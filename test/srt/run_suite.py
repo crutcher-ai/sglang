@@ -51,6 +51,7 @@ suites = {
         TestFile("openai_server/features/test_reasoning_content.py", 89),
         TestFile("openai_server/function_call/test_openai_function_calling.py", 60),
         TestFile("openai_server/function_call/test_tool_choice.py", 226),
+        TestFile("function_call/test_json_schema_constraint.py", 30),
         TestFile("openai_server/validation/test_large_max_new_tokens.py", 41),
         TestFile("openai_server/validation/test_matched_stop.py", 60),
         TestFile("openai_server/validation/test_openai_server_ignore_eos.py", 85),
@@ -165,9 +166,6 @@ suites = {
     "per-commit-8-gpu-h20": [
         TestFile("quant/test_w4a8_deepseek_v3.py", 371),
     ],
-    "nightly": [
-        TestFile("test_nightly_gsm8k_eval.py"),
-    ],
     "vllm_dependency_test": [
         TestFile("quant/test_awq.py", 163),
         TestFile("test_bnb.py", 5),
@@ -208,6 +206,7 @@ suite_amd = {
         TestFile("openai_server/features/test_reasoning_content.py", 89),
         TestFile("openai_server/function_call/test_openai_function_calling.py", 60),
         TestFile("openai_server/function_call/test_tool_choice.py", 226),
+        TestFile("function_call/test_json_schema_constraint.py", 30),
         TestFile("openai_server/validation/test_large_max_new_tokens.py", 41),
         TestFile("openai_server/validation/test_matched_stop.py", 60),
         TestFile("openai_server/validation/test_openai_server_ignore_eos.py", 85),
