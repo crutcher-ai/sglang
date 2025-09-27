@@ -51,7 +51,6 @@ from sglang.utils import is_in_ci
 
 logger = logging.getLogger(__name__)
 
-
 # Define constants
 LOAD_FORMAT_CHOICES = [
     "auto",
@@ -541,7 +540,7 @@ class ServerArgs:
                 # For GPUs with more memory, we use a larger chunked_prefill_size and
                 # capture more cuda graphs, so they need to reserve more memory.
                 parallel_size = self.tp_size * self.pp_size
-                print(f"{gpu_mem=}")
+
                 if gpu_mem < 20 * 1024:
                     # T4, 4080. (chunked_prefill_size 2k, cuda_graph_max_bs 8)
                     reserved_mem = (2.8 + parallel_size / 10) * 1024
