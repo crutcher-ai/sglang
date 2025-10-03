@@ -396,13 +396,22 @@ def save_configs(
 
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
-    filename = get_config_file_name(
-        num_experts,
-        shard_intermediate_size // 2,
-        dtype_str,
-        block_shape,
-        per_channel_quant,
-    )
+    try:
+        filename = get_config_file_name(
+            num_experts,
+            shard_intermediate_size // 2,
+            dtype_str,
+            block_shape,
+            per_channel_quant,
+        )
+    except TypeError:
+        # Older fused_moe_triton_config implementations expect only block_shape.
+        filename = get_config_file_name(
+            num_experts,
+            shard_intermediate_size // 2,
+            dtype_str,
+            block_shape,
+        )
 
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:

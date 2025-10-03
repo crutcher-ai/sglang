@@ -94,6 +94,7 @@ def fused_marlin_moe(
         topk_ids.shape[1],
         None,
         is_marlin=True,
+        per_channel_quant=False,
     )
     config = get_config_func(M)
 
