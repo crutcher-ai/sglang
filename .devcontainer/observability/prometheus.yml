@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: sglang
+    static_configs:
+      - targets: ["sglang-dev:30000"]
+
+  - job_name: sglang-router
+    static_configs:
+      - targets: ["sglang-dev:29000"]
