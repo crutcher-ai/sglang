@@ -1,14 +1,33 @@
 {
     "name": "sglang",
     "remoteUser": "devuser",
-    "dockerComposeFile": [
-        "./docker-compose-observability.yml"
-    ],
-    "service": "sglang-dev",
-    "runServices": [
-        "sglang-dev"
-    ],
     "workspaceFolder": "/workspaces/sglang",
+    "build": {
+        "dockerfile": "./Dockerfile.gh200",
+        "context": "..",
+        "args": {
+            "HOST_UID": "1000",
+            "HOST_GID": "1000"
+        }
+    },
+    "runArgs": [
+        "--gpus", "all",
+        "--shm-size", "32g",
+        "--ipc", "host",
+        "--add-host", "host.docker.internal:host-gateway",
+        "--cap-add", "SYS_ADMIN"
+    ],
+    "mounts": [
+        "source=${localWorkspaceFolder}/.devcontainer/storage/models,target=/models,type=bind",
+        "source=${localWorkspaceFolder}/.devcontainer/storage/huggingface,target=/home/devuser/.cache/huggingface,type=bind",
+        "source=${localWorkspaceFolder}/.devcontainer/storage/profiles,target=/profiles,type=bind",
+        "source=${localWorkspaceFolder}/.devcontainer/storage/logs,target=/telemetry/logs,type=bind",
+        "source=${localWorkspaceFolder}/.devcontainer/storage/prometheus,target=/telemetry/prometheus,type=bind",
+        "source=${localWorkspaceFolder}/.devcontainer/storage/jaeger,target=/telemetry/jaeger,type=bind",
+        "source=${localWorkspaceFolder}/.devcontainer/storage/container_run_meta.env,target=/telemetry/container_run_meta.env,type=bind"
+    ],
+    "overrideCommand": true,
+    "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -19,8 +38,15 @@
             ]
         }
     },
-    "remoteEnv": {
-        "HOME": "/home/devuser"
+    "containerEnv": {
+        "HOME": "/home/devuser",
+        "CUDA_HOME": "/usr/local/cuda",
+        "TRITON_CACHE_DIR": "/profiles/triton",
+        "TORCHINDUCTOR_CACHE_DIR": "/profiles/torchinductor",
+        "FLASHINFER_WORKSPACE_DIR": "/profiles/flashinfer",
+        "LOG_ROOT": "/telemetry/logs",
+        "PROM_STORAGE_ROOT": "/telemetry/prometheus",
+        "JAEGER_STORAGE_ROOT": "/telemetry/jaeger"
     },
-    "postCreateCommand": "/bin/bash .devcontainer/post-create.sh"
+    "containerCommand": ["sleep", "infinity"]
 }

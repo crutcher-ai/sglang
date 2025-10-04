@@ -1,95 +1,79 @@
 # Devcontainer Observability Stack
 
-This directory holds the observability orchestration for the SGLang devcontainer.
-It defines the Docker Compose topology, OpenTelemetry collector configuration, and
-Prometheus scrape rules used during local benchmarking and qualification.
+The devcontainer image bundles Prometheus, Jaeger all-in-one, node_exporter, and
+dcgm-exporter alongside the SGLang runtime so that every container lifetime
+produces a self-contained observability bundle.
 
-## Compose Topology
+## Components
 
-The compose file is `.devcontainer/docker-compose-observability.yml`. It defines
-these services (all optional via the `observability` profile unless noted):
+All services run inside the `sglang-dev` container and are started by
+`.devcontainer/observability/init-run.sh`. For DCGM profiling gauges (SM/DRAM/
+tensor activity, NVML utilisation, etc.) the container must launch with
+`--cap-add SYS_ADMIN`; the init script will attempt to apply `cap_sys_admin` to
+`dcgm-exporter` and logs a warning if the capability is missing. (Grace↔Hopper
+C2C/host-memory counters are not exposed on this VM; see
+`metrics_catalog.final.md` for the supported set.)
 
-| Service | Purpose | Notes |
-| --- | --- | --- |
-| `sglang-dev` | Primary development container | Builds from `.devcontainer/Dockerfile.gh200`, initializes a per-run context via `init-run.sh`, exposes `/profiles` for caches/logs |
-| `otel-collector` | Receives OTLP traces/metrics and forwards traces to Jaeger | Configured by `otel-collector.yml` |
-| `jaeger` | Stores and serves traces | Badger DB persisted under `.devcontainer/storage/jaeger/` (`BADGER_EPHEMERAL=false`) |
-| `prometheus` | Scrapes metrics from SGLang, exporters, and benchmarks | TSDB persisted under `.devcontainer/storage/prometheus/` |
-| `dcgm-exporter` | Exposes detailed GPU telemetry | Runs NVIDIA's DCGM exporter (`nvidia/dcgm-exporter:4.4.1-4.5.2-ubuntu22.04`), scraped at port 9400 |
-| `node-exporter` | Exposes host CPU/memory/disk metrics | Scraped at port 9100 (requires Linux host mounts) |
+| Component        | Listen Ports | Data Directory                                   |
+|------------------|--------------|--------------------------------------------------|
+| Prometheus       | 9090         | `/telemetry/prometheus/container-run-*/`         |
+| Jaeger UI/OTLP   | 16686 / 4317 | `/telemetry/jaeger/container-run-*/badger/{key,value}` |
+| node_exporter    | 9100         | none (metrics only)                              |
+| dcgm-exporter    | 9400         | none (metrics only)                              |
+| SGLang server    | 30000 / 29000| user-launched via `docker exec`                  |
 
-## Container Manifest
+## Container Lifecycle
 
-The base image (`lmsysorg/sglang:dev-arm64`) is augmented in
-`.devcontainer/Dockerfile.gh200` to:
+On start, `init-run.sh`:
 
-- Create non-root `devuser` mirroring host UID/GID.
-- Install `uv` and Rust toolchains for Python/Rust development.
-- Copy shell/editor dotfiles for convenience.
-- Pre-create `/home/devuser/.cache` and `/home/devuser/.local` to avoid
-  permission issues with uv, FlashInfer, and DeepGEMM caches.
+1. Generates a run identifier `container-run-<timestamp>-<id>`.
+2. Writes metadata to `/telemetry/container_run_meta.env` (run ID, start time,
+   log path, Prometheus/Jaeger storage paths).
+3. Creates one log file per run at `/telemetry/logs/container-run-<timestamp>-<id>.log`
+   and tees all container stdout/stderr into it.
+4. Launches Prometheus, Jaeger all-in-one, node_exporter, and dcgm-exporter as
+   background processes after starting `nv-hostengine`.
+5. Executes the devcontainer command (`sleep infinity`), leaving the container
+   ready for interactive work.
 
-When the compose stack starts, `init-run.sh` generates a container run
-identifier (`container-run-<timestamp>-<id>`), records the metadata in
-`/telemetry/container_run_meta.env` (configurable via `RUN_META_FILE`), and
-tees the container's stdout/stderr into a single log file at
-`/telemetry/logs/container-run-<timestamp>-<id>.log`.
+Each run therefore produces a single log file, a Prometheus TSDB directory, and
+Jaeger badger data rooted under `.devcontainer/storage/` on the host.
 
 ## Storage Layout
 
-`./.devcontainer/setup-storage.sh` prepares host-side directories with the
-following structure:
+Running `./.devcontainer/setup-storage.sh` prepares the host-side directory tree:
 
 ```
 .devcontainer/storage/
   models/                # model checkpoints (durable)
   huggingface/           # HF caches (durable)
   profiles/
-    deep_gemm/           # DeepGEMM compiled kernels
-    flashinfer/          # FlashInfer workspaces
-    moe_configs/configs/ # Triton MoE tuning outputs
+    deep_gemm/
+    flashinfer/
+    moe_configs/configs/
+    torchinductor/
+    triton/
   logs/
-    container-run-*.log  # One container-lifetime log per stack invocation
-  prometheus/            # Prometheus TSDB (durable)
-  jaeger/
-    badger/              # Jaeger primary badger store (durable)
-    badger2/             # Jaeger secondary badger store (durable)
+    container-run-*.log  # One container-lifetime log per run
+  container_run_meta.env # Updated each time the container starts
+  prometheus/            # Per-run TSDB directories (created at runtime)
+  jaeger/                # Per-run badger directories (created at runtime)
 ```
 
-Everything under `.devcontainer/storage/` persists across container lifetimes.
-Prometheus and Jaeger mount their respective directories; caches live inside
-`/profiles`, while the run metadata and log file are written directly under
-`/telemetry` (mirrored to `.devcontainer/storage`).
+Prometheus and Jaeger are configured to write into subdirectories named after
+`CONTAINER_RUN_ID`. Older runs can be inspected by pointing Prometheus/Jaeger at
+those persisted directories.
 
-`setup-storage.sh` also relaxes permissions on the Prometheus and Jaeger
-directories so the upstream containers (which run as unprivileged users) can
-write their data without additional configuration.
+## Launching SGLang
 
-Run this script before launching the compose stack; if you run it after the
-containers have already written data you may need elevated privileges to adjust
-ownership of the Prometheus/Jaeger stores.
-
-Ephemeral data (e.g., transient OTEL processor buffers) stay in-container.
-
-## Metrics & Traces
-
-- Prometheus (`observability/prometheus.yml`) scrapes:
-  - SGLang runtime at `sglang-dev:30000`.
-  - Router metrics at `sglang-dev:29000` when present.
-  - NVIDIA DCGM exporter at `dcgm-exporter:9400`.
-  - Node exporter at `node-exporter:9100`.
-  - Placeholder `benchmark` job for harness-provided metrics.
-- OpenTelemetry collector (`observability/otel-collector.yml`) accepts OTLP
-  gRPC/HTTP traffic and forwards to Jaeger and the debug exporter. Both the
-  SGLang server and benchmarks should emit spans to the collector.
-
-## Logging
-
-`init-run.sh` tees all container stdout/stderr into the run-scoped log file
-reported in `container_run_meta.env`. To keep SGLang output with the rest of the
-container log, start it like this:
+Because `init-run.sh` already captures stdout/stderr, simply start SGLang from
+inside the container and append to the log noted in `container_run_meta.env`:
 
 ```bash
+# On the host
+RUN_META=.devcontainer/storage/container_run_meta.env
+source "$RUN_META"
+
 docker exec -d sglang-dev bash -lc '
   source /telemetry/container_run_meta.env
   python -m sglang.launch_server \
@@ -104,17 +88,30 @@ docker exec -d sglang-dev bash -lc '
 '
 ```
 
-After `docker compose down`, the corresponding
-`.devcontainer/storage/logs/container-run-*.log` remains for auditing.
+The log survives `docker compose down` / `docker stop`; each subsequent container
+lifetime produces a new file.
+
+## Metrics & Traces
+
+- Prometheus scrapes exporters on localhost (node_exporter at `:9100`,
+  dcgm-exporter at `:9400`, and SGLang at `:30000` once a server instance is
+  running). The global `external_labels` block injects `container_run` with the
+  current run ID.
+- The Jaeger all-in-one binary exposes OTLP gRPC/HTTP on `:4317/:4318` so SGLang
+  can emit traces directly without a separate collector.
+- A complete list of currently emitted metrics is maintained in
+  `.devcontainer/observability/metrics_catalog.final.md`.
 
 ## Workflow Summary
 
-1. Run `./.devcontainer/setup-storage.sh` on the host once to prepare the storage tree.
-2. Launch the devcontainer via VS Code or `docker compose -f .devcontainer/docker-compose-observability.yml up -d`.
-3. (Optional) enable the `observability` profile to start Prometheus, Jaeger,
-   DCGM exporter, and node exporter.
-4. Benchmarks and SGLang can read `CONTAINER_RUN_ID` and
-   `CONTAINER_LOG_FILE` from `/telemetry/container_run_meta.env` to tag metrics
-   or to append to the container-lifetime log.
+1. Run `./.devcontainer/setup-storage.sh` once to prepare the host directories and
+   seed `.devcontainer/storage/container_run_meta.env` for run metadata.
+2. Open the devcontainer (VS Code or `devcontainer open`)—Prometheus, Jaeger, and
+   the exporters start automatically.
+3. Start SGLang via `docker exec ...` as shown above; issue requests and collect
+   metrics/traces.
+4. When finished, stop the container; inspect
+   `.devcontainer/storage/logs/container-run-*.log` and the matching Prometheus/
+   Jaeger directories for the full observability artifact.
 
-This README should be updated when services, mounts, or tooling versions change.
+Update this README whenever binaries, ports, or storage paths change.
