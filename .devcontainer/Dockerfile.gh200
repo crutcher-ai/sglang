@@ -1,3 +1,6 @@
+# Stage to grab dcgm-exporter binary and DCGM libraries (multi-arch image provides arm64)
+FROM docker.io/nvidia/dcgm-exporter:4.4.1-4.5.2-ubuntu22.04 AS dcgm_exporter
+
 FROM lmsysorg/sglang:dev-arm64@sha256:f0ea169be256e15a63f5e64e18bd766b63827b6a99b7ed5227ad40eb2debc41c
 
 # Create non-root user with specified UID and GID
@@ -7,7 +10,7 @@ RUN groupadd -g $HOST_GID devuser && \
     useradd -m -u $HOST_UID -g $HOST_GID -s /bin/zsh devuser
 
 # Give devuser sudo access
-RUN apt-get update && apt-get install -y sudo && \
+RUN apt-get update && apt-get install -y sudo libcap2-bin && \
     echo "devuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/devuser && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
@@ -33,11 +36,39 @@ ENV PATH=$HOME/.local/bin:$PATH
 RUN mkdir -p /workspaces && chown -R devuser:devuser /workspaces
 WORKDIR /workspaces/sglang
 
-# Switch to devuser
-USER devuser
+# Install observability binaries (Prometheus, node_exporter, Jaeger all-in-one, dcgm-exporter)
+ENV PROMETHEUS_VERSION=3.5.0 \
+    NODE_EXPORTER_VERSION=1.9.1 \
+    JAEGER_VERSION=1.73.0
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN set -eux; \
+    workdir=$(mktemp -d) && cd "$workdir" && \
+    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-arm64.tar.gz -o prometheus.tar.gz && \
+    tar -xf prometheus.tar.gz && \
+    install -m 0755 prometheus-${PROMETHEUS_VERSION}.linux-arm64/prometheus /usr/local/bin/prometheus && \
+    install -m 0755 prometheus-${PROMETHEUS_VERSION}.linux-arm64/promtool /usr/local/bin/promtool && \
+    curl -fsSL https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-arm64.tar.gz -o node_exporter.tar.gz && \
+    tar -xf node_exporter.tar.gz && \
+    install -m 0755 node_exporter-${NODE_EXPORTER_VERSION}.linux-arm64/node_exporter /usr/local/bin/node_exporter && \
+    curl -fsSL https://github.com/jaegertracing/jaeger/releases/download/v${JAEGER_VERSION}/jaeger-${JAEGER_VERSION}-linux-arm64.tar.gz -o jaeger.tar.gz && \
+    tar -xf jaeger.tar.gz && \
+    install -m 0755 jaeger-${JAEGER_VERSION}-linux-arm64/jaeger-all-in-one /usr/local/bin/jaeger-all-in-one && \
+    rm -rf "$workdir"
 
-# Install rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+COPY --from=dcgm_exporter /usr/bin/dcgm-exporter /usr/local/bin/dcgm-exporter
+COPY --from=dcgm_exporter /usr/bin/nv-hostengine /usr/local/bin/nv-hostengine
+COPY --from=dcgm_exporter /usr/bin/dcgmi /usr/local/bin/dcgmi
+COPY --from=dcgm_exporter /etc/dcgm-exporter /etc/dcgm-exporter
+COPY .devcontainer/observability/dcgm-metrics.csv /etc/dcgm-exporter/metrics.csv
+COPY --from=dcgm_exporter /usr/lib/aarch64-linux-gnu/libdcgm*.so* /usr/lib/aarch64-linux-gnu/
+COPY --from=dcgm_exporter /usr/lib/aarch64-linux-gnu/libnvperf_dcgm_host.so /usr/lib/aarch64-linux-gnu/
+
+COPY .devcontainer/observability /opt/observability
+RUN chmod +x /opt/observability/init-run.sh
+
+# Install developer tooling as devuser
+RUN su devuser -c "curl -LsSf https://astral.sh/uv/install.sh | sh" \
+    && su devuser -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+
+ENTRYPOINT ["/opt/observability/init-run.sh"]
+CMD ["sleep", "infinity"]
