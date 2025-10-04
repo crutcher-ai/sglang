@@ -2,7 +2,7 @@
     "name": "sglang",
     "remoteUser": "devuser",
     "dockerComposeFile": [
-        "./docker-compose.yml"
+        "./docker-compose-observability.yml"
     ],
     "service": "sglang-dev",
     "runServices": [

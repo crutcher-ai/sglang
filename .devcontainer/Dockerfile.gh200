@@ -20,6 +20,10 @@ RUN cp -r /root/.oh-my-zsh /home/devuser/.oh-my-zsh && \
     sed -i 's|/root/.oh-my-zsh|/home/devuser/.oh-my-zsh|g' /home/devuser/.zshrc && \
     chown -R devuser:devuser /home/devuser/
 
+# Ensure devuser owns standard cache/bin dirs used by uv, flashinfer, etc.
+RUN mkdir -p /home/devuser/.cache /home/devuser/.local && \
+    chown -R devuser:devuser /home/devuser/.cache /home/devuser/.local
+
 # Environment defaults for the dev user
 ENV HOME=/home/devuser \
     CUDA_HOME=/usr/local/cuda
