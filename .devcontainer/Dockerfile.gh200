@@ -31,6 +31,7 @@ RUN mkdir -p /home/devuser/.cache /home/devuser/.local && \
 ENV HOME=/home/devuser \
     CUDA_HOME=/usr/local/cuda
 ENV PATH=$HOME/.local/bin:$PATH
+ENV CONTAINER_IMAGE=sglang-dev:gh200
 
 # Prepare workspace root with matching ownership
 RUN mkdir -p /workspaces && chown -R devuser:devuser /workspaces

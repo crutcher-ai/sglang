@@ -15,7 +15,8 @@ mkdir -p \
     "$storage_root/profiles/flashinfer" \
     "$storage_root/logs" \
     "$storage_root/prometheus" \
-    "$storage_root/jaeger"
+    "$storage_root/jaeger" \
+    "$storage_root/container_runs"
 
 meta_file="$storage_root/container_run_meta.env"
 if [ ! -f "$meta_file" ]; then
