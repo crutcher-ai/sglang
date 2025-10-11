@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "model": {
+    "default_model_path": "/models/Qwen/Qwen3-Next-80B-A3B-Thinking-FP8",
+    "kv_cache_dtype": "fp8_e4m3",
+    "moe_dtype": "fp8_w8a8"
+  },
+  "server": {
+    "mem_fraction_static": 0.94,
+    "chunked_prefill_size": 4096,
+    "context_length": 32768,
+    "max_prefill_tokens": 32768,
+    "max_total_tokens": 32768,
+    "max_mamba_cache_size": 1
+  }
+}

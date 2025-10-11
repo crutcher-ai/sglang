@@ -2,6 +2,7 @@
 set -euo pipefail
 
 # Location of this script and repo root
+# Simple help and arg handling
 for arg in "$@"; do
   case "$arg" in
     -h|--help)
@@ -9,12 +10,18 @@ for arg in "$@"; do
 Usage: start_observable_container.sh
 
 Starts the sglang observability helper container, waits for the per-run manifest
-to become available, and prints both host-side and container-side manifest
-paths. The script exits non-zero if the container fails to launch.
+to become available, enriches it (paths, cache snapshot), and prints both host-
+side and container-side manifest paths. The script exits non-zero if the
+container fails to launch.
 
 Environment variables:
-  HOST_MANIFEST_ROOT  Override the host path used when composing manifest
-                      pointers (defaults to /.devcontainer/storage/container_runs).
+  HOST_OBS_ROOT        Parent root for all observability data (default: $HOME/sglang-observability).
+  HOST_TELEMETRY_ROOT  Override path for telemetry (default: $HOST_OBS_ROOT/telemetry).
+  HOST_PROFILES_ROOT   Override path for kernel caches (default: $HOST_OBS_ROOT/profiles).
+  HOST_MODELS_ROOT     Override path for models (default: $HOST_OBS_ROOT/models).
+  HOST_HF_ROOT         Override path for HuggingFace cache (default: $HOST_OBS_ROOT/huggingface).
+  CONTAINER_NAME       Container name (default: sglang-dev)
+  IMAGE_NAME           Image name (default: sglang-dev:gh200)
 
 No additional arguments are supported.
 EOF
@@ -30,22 +37,92 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-HOST_STORAGE_ROOT="$(realpath "${ROOT_DIR}/.devcontainer/storage")"
-HOST_MANIFEST_ROOT="${HOST_STORAGE_ROOT}/container_runs"
-RUN_META_FILE="${HOST_STORAGE_ROOT}/container_run_meta.env"
 
-CONTAINER_NAME="sglang-dev"
-IMAGE_NAME="sglang-dev:gh200"
+# Determine host roots under a single parent in HOME by default
+HOST_OBS_ROOT="${HOST_OBS_ROOT:-$HOME/sglang-observability}"
+HOST_TELEMETRY_ROOT="${HOST_TELEMETRY_ROOT:-${HOST_OBS_ROOT}/telemetry}"
+HOST_PROFILES_ROOT="${HOST_PROFILES_ROOT:-${HOST_OBS_ROOT}/profiles}"
+HOST_MODELS_ROOT="${HOST_MODELS_ROOT:-${HOST_OBS_ROOT}/models}"
 
-docker ps -aq -f name="${CONTAINER_NAME}" >/dev/null 2>&1 && {
-  echo "Removing existing container ${CONTAINER_NAME}"
-  docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-}
+HOST_MANIFEST_ROOT="${HOST_TELEMETRY_ROOT}/container_runs"
+RUN_META_FILE="${HOST_TELEMETRY_ROOT}/container_run_meta.env"
 
-# Run storage prep to ensure bind mounts exist
-"${ROOT_DIR}/.devcontainer/setup-storage.sh"
+CONTAINER_NAME="${CONTAINER_NAME:-sglang-dev}"
+IMAGE_NAME="${IMAGE_NAME:-sglang-dev:gh200}"
 
-: > "${RUN_META_FILE}"
+# Testing hooks:
+#  - VALIDATE_ONLY=1: run preflight + directory setup and exit 0 before any Docker calls
+#  - EXPECT_OWNER_UID/EXPECT_OWNER_GID: override expected ownership in preflight checks
+EXPECT_UID="${EXPECT_OWNER_UID:-$(id -u)}"
+EXPECT_GID="${EXPECT_OWNER_GID:-$(id -g)}"
+# Allow different expected owner for specific files (used by tests)
+EXPECT_POINTER_UID="${EXPECT_POINTER_OWNER_UID:-${EXPECT_UID}}"
+EXPECT_POINTER_GID="${EXPECT_POINTER_OWNER_GID:-${EXPECT_GID}}"
+
+# In validate-only mode, we skip all Docker interactions entirely.
+if [[ "${VALIDATE_ONLY:-0}" != "1" ]]; then
+  existing_cid=$(docker ps -aq -f name="^${CONTAINER_NAME}$" || true)
+  if [[ -n "${existing_cid}" ]]; then
+    echo "Removing existing container ${CONTAINER_NAME} (${existing_cid})"
+    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Prepare host directories
+mkdir -p \
+  "${HOST_TELEMETRY_ROOT}/logs" \
+  "${HOST_TELEMETRY_ROOT}/prometheus" \
+  "${HOST_TELEMETRY_ROOT}/jaeger" \
+  "${HOST_MANIFEST_ROOT}" \
+  "${HOST_PROFILES_ROOT}" \
+  "${HOST_PROFILES_ROOT}/triton" \
+  "${HOST_PROFILES_ROOT}/torchinductor" \
+  "${HOST_PROFILES_ROOT}/flashinfer" \
+  "${HOST_PROFILES_ROOT}/deep_gemm" \
+  "${HOST_PROFILES_ROOT}/moe_configs/configs" \
+  "${HOST_PROFILES_ROOT}/.locks" \
+  "${HOST_PROFILES_ROOT}/.in_progress" \
+  "${HOST_MODELS_ROOT}"
+
+# Optional preflight: ensure host dirs (and key files, if present) are owned by the expected user/group
+if [[ "${HOST_DIR_OWNERSHIP_IGNORE:-}" != "1" ]]; then
+  check_own() {
+    local p="$1"; [[ -e "$p" ]] || return 0
+    local ug
+    ug=$(stat -c '%u:%g' "$p" 2>/dev/null || echo '')
+    if [[ "$ug" != "${EXPECT_UID}:${EXPECT_GID}" ]]; then
+      echo "ERROR: $p is owned by $ug, not ${EXPECT_UID}:${EXPECT_GID}. Fix with chown -R ${EXPECT_UID}:${EXPECT_GID} '$p' or set HOST_DIR_OWNERSHIP_IGNORE=1 to proceed." >&2
+      exit 3
+    fi
+  }
+  check_own_file() {
+    local p="$1"; [[ -e "$p" ]] || return 0
+    local ug
+    ug=$(stat -c '%u:%g' "$p" 2>/dev/null || echo '')
+    if [[ "$ug" != "${EXPECT_POINTER_UID}:${EXPECT_POINTER_GID}" ]]; then
+      echo "ERROR: $p is owned by $ug, not ${EXPECT_POINTER_UID}:${EXPECT_POINTER_GID}. Fix with chown ${EXPECT_POINTER_UID}:${EXPECT_POINTER_GID} '$p' or remove it." >&2
+      exit 3
+    fi
+  }
+  check_own "${HOST_TELEMETRY_ROOT}"; check_own "${HOST_PROFILES_ROOT}"; check_own "${HOST_MODELS_ROOT}"
+  # If a stale pointer file exists, validate its ownership too.
+  if [[ -e "${RUN_META_FILE}" ]]; then
+    check_own_file "${RUN_META_FILE}"
+  fi
+fi
+
+# Remove stale pointer to avoid reading an old manifest
+if [[ -f "${RUN_META_FILE}" ]]; then
+  rm -f "${RUN_META_FILE}" || true
+fi
+
+# In validate-only mode, stop here after preflight and directory initialization.
+if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
+  echo "VALIDATE_ONLY: preflight passed (no container launched)"
+  exit 0
+fi
+
+INIT_HOOK="/workspaces/sglang/.devcontainer/post-create.sh"
 
 container_id=$(docker run -d \
   --name "${CONTAINER_NAME}" \
@@ -55,18 +132,27 @@ container_id=$(docker run -d \
   --network host \
   --add-host host.docker.internal:host-gateway \
   --cap-add SYS_ADMIN \
+  -e INIT_RUN_HOOK="${INIT_HOOK}" \
+  -e HOST_TELEMETRY_ROOT="${HOST_TELEMETRY_ROOT}" \
+  -e HOST_PROFILES_ROOT="${HOST_PROFILES_ROOT}" \
+  -e HOST_MODELS_ROOT="${HOST_MODELS_ROOT}" \
   -e HOST_MANIFEST_ROOT="${HOST_MANIFEST_ROOT}" \
-  -v "${HOST_STORAGE_ROOT}/models:/models" \
-  -v "${HOST_STORAGE_ROOT}/huggingface:/home/devuser/.cache/huggingface" \
-  -v "${HOST_STORAGE_ROOT}/profiles:/profiles" \
-  -v "${HOST_STORAGE_ROOT}/logs:/telemetry/logs" \
-  -v "${HOST_STORAGE_ROOT}/prometheus:/telemetry/prometheus" \
-  -v "${HOST_STORAGE_ROOT}/jaeger:/telemetry/jaeger" \
-  -v "${HOST_STORAGE_ROOT}/container_run_meta.env:/telemetry/container_run_meta.env" \
-  -v "${HOST_MANIFEST_ROOT}:/telemetry/container_runs" \
+  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  -e RUN_FILE_UID="$(id -u)" -e RUN_FILE_GID="$(id -g)" \
+  --entrypoint /bin/bash \
+  -v "${HOST_TELEMETRY_ROOT}:/telemetry" \
+  -v "${HOST_PROFILES_ROOT}:/profiles" \
+  -v "${HOST_MODELS_ROOT}:/models" \
+  -v "${ROOT_DIR}:/workspaces/sglang" \
   -w /workspaces/sglang \
   "${IMAGE_NAME}" \
-  sleep infinity)
+  -lc 'set -e; \
+        if id devuser >/dev/null 2>&1; then \
+          if [ -n "${HOST_GID:-}" ]; then groupmod -g "${HOST_GID}" devuser 2>/dev/null || true; fi; \
+          if [ -n "${HOST_UID:-}" ]; then usermod -u "${HOST_UID}" devuser 2>/dev/null || true; fi; \
+          chown -R devuser:devuser /home/devuser 2>/dev/null || true; \
+        fi; \
+        exec /opt/observability/init-run.sh sleep infinity')
 
 echo "${CONTAINER_NAME} is starting (container id ${container_id})."
 
@@ -98,7 +184,7 @@ while true; do
     exit 1
   fi
 
-  if [ -s "${RUN_META_FILE}" ]; then
+  if [ -e "${RUN_META_FILE}" ]; then
     manifest_container=$(awk -F= '/^CONTAINER_RUN_META_JSON=/{print $2}' "${RUN_META_FILE}" || true)
     manifest_host=$(awk -F= '/^CONTAINER_RUN_META_JSON_HOST=/{print $2}' "${RUN_META_FILE}" || true)
 
@@ -107,130 +193,7 @@ while true; do
     fi
 
     if [ -n "${manifest_host}" ] && [ -f "${manifest_host}" ]; then
-      warnings_output=""
-      if command -v python3 >/dev/null 2>&1; then
-        warnings_output=$(MANIFEST_PATH="${manifest_host}" HOST_STORAGE_ROOT="${HOST_STORAGE_ROOT}" REPO_ROOT="${ROOT_DIR}" python3 - <<'PY'
-import json
-import os
-from pathlib import Path, PurePosixPath
-
-manifest_path = Path(os.environ["MANIFEST_PATH"])
-host_storage_root = Path(os.environ["HOST_STORAGE_ROOT"]).resolve()
-repo_root = Path(os.environ["REPO_ROOT"]).resolve()
-
-with manifest_path.open("r", encoding="utf-8") as f:
-    data = json.load(f)
-
-storage = data.get("storage", {})
-exporter_state = data.get("exporters_state", {})
-
-telemetry_surfaces = data.setdefault("telemetry_surfaces", {})
-telemetry_surfaces.setdefault(
-    "sglang_metrics",
-    {
-        "status": "expected",
-        "details": "Prometheus scrape at localhost:30000 once SGLang server launches with --enable-metrics",
-    },
-)
-telemetry_surfaces.setdefault(
-    "tracing",
-    {
-        "status": "expected",
-        "details": "OTLP gRPC :4317, HTTP :4318 (emitted when --enable-trace is set)",
-    },
-)
-telemetry_surfaces["node_metrics"] = {
-    "status": exporter_state.get("node_exporter", "unknown"),
-    "details": "node_exporter on localhost:9100",
-}
-telemetry_surfaces["dcgm_metrics"] = {
-    "status": exporter_state.get("dcgm_exporter", "unknown"),
-    "details": "dcgm-exporter on localhost:9400 (requires SYS_ADMIN capability)",
-}
-
-telemetry_root = PurePosixPath("/telemetry")
-container_paths = {}
-for key, value in storage.items():
-    p = PurePosixPath(value)
-    try:
-        container_paths[key] = str(p.relative_to(telemetry_root))
-    except ValueError:
-        container_paths[key] = value
-container_paths["storage_root"] = "telemetry"
-
-storage_root_rel = PurePosixPath(os.path.relpath(host_storage_root, repo_root))
-
-host_paths = {"storage_root": str(storage_root_rel)}
-
-if "log_file" in storage:
-    host_paths["log_file"] = str(storage_root_rel / "logs" / PurePosixPath(storage["log_file"]).name)
-if "prometheus_dir" in storage:
-    host_paths["prometheus_dir"] = str(storage_root_rel / "prometheus" / PurePosixPath(storage["prometheus_dir"]).name)
-if "jaeger_dir" in storage:
-    host_paths["jaeger_dir"] = str(storage_root_rel / "jaeger" / PurePosixPath(storage["jaeger_dir"]).name)
-host_paths["profiles_root"] = str(storage_root_rel / "profiles")
-host_paths["models_root"] = str(storage_root_rel / "models")
-host_paths["huggingface_root"] = str(storage_root_rel / "huggingface")
-
-data["paths"] = {
-    "host": host_paths,
-    "container": container_paths,
-}
-
-def directory_has_files(directory: Path) -> bool:
-    for child in directory.rglob("*"):
-        if child.is_file():
-            return True
-    return False
-
-
-profiles_info = {}
-profiles_root = host_storage_root / "profiles"
-if profiles_root.exists():
-    for entry in sorted(profiles_root.glob("*")):
-        if not entry.is_dir():
-            continue
-        rel_repo = PurePosixPath(os.path.relpath(entry, repo_root))
-        has_data = directory_has_files(entry)
-        profiles_info[entry.name] = {
-            "path": str(rel_repo),
-            "has_cached_data": has_data,
-        }
-
-if profiles_info:
-    data["profile_storage"] = profiles_info
-
-storage_roots = {}
-for name in ["models", "huggingface", "profiles"]:
-    path = host_storage_root / name
-    rel_repo = PurePosixPath(os.path.relpath(path, repo_root))
-    storage_roots[name] = str(rel_repo)
-
-data["storage_roots"] = storage_roots
-
-with manifest_path.open("w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-
-warnings = data.get("warnings") or []
-for line in warnings:
-    print(line)
-PY
-        ) || true
-      fi
-
-      if [ -n "${warnings_output}" ]; then
-        echo "Observability warnings recorded in manifest:"
-        while IFS= read -r warning_line; do
-          [ -z "${warning_line}" ] && continue
-          echo " - ${warning_line}"
-        done <<EOF
-${warnings_output}
-EOF
-      fi
-
       echo "Observability container ready after ${elapsed}s."
-
       if [ -n "${manifest_host}" ]; then
         echo "CONTAINER_RUN_META_JSON_HOST=${manifest_host}"
       fi

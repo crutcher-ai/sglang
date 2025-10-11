@@ -17,9 +17,9 @@ fi
 
 # Install the requested optional dependencies (defaults to [tracing]).
 if [[ -n "${EXTRAS}" ]]; then
-    ${PYTHON_BIN} -m pip install "./python[${EXTRAS}]"
+    ${PYTHON_BIN} -m pip install -e "/workspaces/sglang/python[${EXTRAS}]"
 else
-    ${PYTHON_BIN} -m pip install -e ./python
+    ${PYTHON_BIN} -m pip install -e /workspaces/sglang/python
 fi
 
 # Quick sanity check so failures surface during container creation.

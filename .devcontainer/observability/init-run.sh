@@ -7,9 +7,13 @@ PROM_STORAGE_ROOT="${PROM_STORAGE_ROOT:-/telemetry/prometheus}"
 JAEGER_STORAGE_ROOT="${JAEGER_STORAGE_ROOT:-/telemetry/jaeger}"
 RUN_MANIFEST_ROOT="${RUN_MANIFEST_ROOT:-/telemetry/container_runs}"
 PROM_CONFIG_TEMPLATE="${PROM_CONFIG_TEMPLATE:-/opt/observability/prometheus.yml.tmpl}"
-PROM_CONFIG_FILE="${PROM_CONFIG_FILE:-/etc/prometheus/prometheus.yml}"
+PROM_CONFIG_FILE="${PROM_CONFIG_FILE:-/telemetry/prometheus/prometheus.yml}"
 
-mkdir -p "${LOG_ROOT}" "${PROM_STORAGE_ROOT}" "${JAEGER_STORAGE_ROOT}"
+as_devuser() {
+  sudo -u devuser -E "$@"
+}
+
+as_devuser mkdir -p "${LOG_ROOT}" "${PROM_STORAGE_ROOT}" "${JAEGER_STORAGE_ROOT}" "${RUN_MANIFEST_ROOT}"
 
 warnings=()
 
@@ -56,29 +60,13 @@ jaeger_value_dir="${jaeger_run_root}/badger/data"
 
 mkdir -p "${prom_storage_dir}" "${jaeger_key_dir}" "${jaeger_value_dir}" "$(dirname "${PROM_CONFIG_FILE}")"
 
-touch "${log_file}"
-chmod 600 "${log_file}"
+as_devuser touch "${log_file}"
+as_devuser chmod 600 "${log_file}"
 
-run_uid="${RUN_FILE_UID:-}"
-run_gid="${RUN_FILE_GID:-}"
-if [ -z "${run_uid}" ] || [ -z "${run_gid}" ]; then
-  if id devuser >/dev/null 2>&1; then
-    run_uid="$(id -u devuser)"
-    run_gid="$(id -g devuser)"
-  else
-    run_uid="0"
-    run_gid="0"
-  fi
-fi
-
-chown "${run_uid}:${run_gid}" "${log_file}"
-chown -R "${run_uid}:${run_gid}" "${prom_storage_dir}" "${jaeger_run_root}"
 meta_dir="$(dirname "${RUN_META_FILE}")"
-install -d -m 770 "${meta_dir}"
-chown "${run_uid}:${run_gid}" "${meta_dir}"
+as_devuser install -d -m 770 "${meta_dir}"
 
-mkdir -p "${RUN_MANIFEST_ROOT}"
-chown "${run_uid}:${run_gid}" "${RUN_MANIFEST_ROOT}"
+as_devuser mkdir -p "${RUN_MANIFEST_ROOT}"
 manifest_json="${RUN_MANIFEST_ROOT}/${container_run_id}.json"
 
 host_manifest_root="${HOST_MANIFEST_ROOT:-}"
@@ -92,9 +80,8 @@ fi
   if [ -n "${host_manifest_path}" ]; then
     echo "CONTAINER_RUN_META_JSON_HOST=${host_manifest_path}"
   fi
-} > "${RUN_META_FILE}"
-chmod 600 "${RUN_META_FILE}"
-chown "${run_uid}:${run_gid}" "${RUN_META_FILE}"
+} | as_devuser tee "${RUN_META_FILE}" >/dev/null
+as_devuser chmod 600 "${RUN_META_FILE}"
 
 export CONTAINER_RUN_ID="${container_run_id}"
 export CONTAINER_RUN_META_JSON="${manifest_json}"
@@ -184,7 +171,7 @@ git_revision=$(git -C /workspaces/sglang rev-parse HEAD 2>/dev/null || echo "unk
 container_image="${CONTAINER_IMAGE:-unknown}"
 start_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-cat > "${manifest_json}" <<EOF
+cat <<EOF | as_devuser tee "${manifest_json}" >/dev/null
 {
   "container_run_id": "${container_run_id}",
   "started_at": "${start_iso}",
@@ -233,8 +220,6 @@ cat > "${manifest_json}" <<EOF
 }
 EOF
 
-chown "${run_uid}:${run_gid}" "${manifest_json}"
-
 echo "CONTAINER_RUN_META_JSON=${manifest_json}"
 if [ -n "${host_manifest_path}" ]; then
   echo "CONTAINER_RUN_META_JSON_HOST=${host_manifest_path}"
@@ -242,9 +227,23 @@ fi
 
 echo "Background services started: Prometheus, Jaeger, node_exporter, dcgm-exporter"
 
-eval "${INIT_RUN_HOOK:-true}"
+export PYTHONPATH="/workspaces/sglang/python${PYTHONPATH:+:${PYTHONPATH}}"
 
-# Ensure hostengine is stopped when container exits
-trap 'pkill -TERM -P $$; if [ -f /tmp/nv-hostengine.pid ]; then pkill -F /tmp/nv-hostengine.pid 2>/dev/null || true; rm -f /tmp/nv-hostengine.pid; fi' EXIT
+if [ -n "${INIT_RUN_HOOK:-}" ]; then
+  as_devuser bash -lc "${INIT_RUN_HOOK}"
+fi
 
-exec "$@"
+# Ensure hostengine is stopped when container exits and clear pointer
+cleanup() {
+  pkill -TERM -P $$ 2>/dev/null || true
+  if [ -f /tmp/nv-hostengine.pid ]; then
+    pkill -F /tmp/nv-hostengine.pid 2>/dev/null || true
+    rm -f /tmp/nv-hostengine.pid
+  fi
+  as_devuser rm -f "${RUN_META_FILE}"
+}
+trap cleanup EXIT
+
+as_devuser "$@" &
+child_pid=$!
+wait "$child_pid"

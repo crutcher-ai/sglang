@@ -1,7 +1,7 @@
 # Stage to grab dcgm-exporter binary and DCGM libraries (multi-arch image provides arm64)
 FROM docker.io/nvidia/dcgm-exporter:4.4.1-4.5.2-ubuntu22.04 AS dcgm_exporter
 
-FROM lmsysorg/sglang:dev-arm64@sha256:f0ea169be256e15a63f5e64e18bd766b63827b6a99b7ed5227ad40eb2debc41c
+FROM lmsysorg/sglang:dev
 
 # Create non-root user with specified UID and GID
 ARG HOST_UID=1000
@@ -10,7 +10,7 @@ RUN groupadd -g $HOST_GID devuser && \
     useradd -m -u $HOST_UID -g $HOST_GID -s /bin/zsh devuser
 
 # Give devuser sudo access
-RUN apt-get update && apt-get install -y sudo libcap2-bin && \
+RUN apt-get update && apt-get install -y sudo libcap2-bin python3-dev build-essential && \
     echo "devuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/devuser && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
@@ -25,7 +25,9 @@ RUN cp -r /root/.oh-my-zsh /home/devuser/.oh-my-zsh && \
 
 # Ensure devuser owns standard cache/bin dirs used by uv, flashinfer, etc.
 RUN mkdir -p /home/devuser/.cache /home/devuser/.local && \
-    chown -R devuser:devuser /home/devuser/.cache /home/devuser/.local
+    chown -R devuser:devuser /home/devuser/.cache /home/devuser/.local && \
+    rm -rf /home/devuser/.cache/flashinfer && \
+    ln -s /profiles/flashinfer /home/devuser/.cache/flashinfer
 
 # Environment defaults for the dev user
 ENV HOME=/home/devuser \
@@ -64,12 +66,23 @@ COPY .devcontainer/observability/dcgm-metrics.csv /etc/dcgm-exporter/metrics.csv
 COPY --from=dcgm_exporter /usr/lib/aarch64-linux-gnu/libdcgm*.so* /usr/lib/aarch64-linux-gnu/
 COPY --from=dcgm_exporter /usr/lib/aarch64-linux-gnu/libnvperf_dcgm_host.so /usr/lib/aarch64-linux-gnu/
 
-COPY .devcontainer/observability /opt/observability
+# Copy only the files needed at runtime; metrics.csv already copied to /etc/dcgm-exporter
+COPY .devcontainer/observability/init-run.sh /opt/observability/init-run.sh
+COPY .devcontainer/observability/prometheus.yml.tmpl /opt/observability/prometheus.yml.tmpl
 RUN chmod +x /opt/observability/init-run.sh
+
+# Set capabilities at build time so entrypoint doesn't need root writes
+RUN setcap 'cap_sys_admin=+ep' /usr/local/bin/dcgm-exporter || true
 
 # Install developer tooling as devuser
 RUN su devuser -c "curl -LsSf https://astral.sh/uv/install.sh | sh" \
     && su devuser -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+
+# Install CLI dependency
+RUN python -m pip install --no-cache-dir -U typer
+
+# Bake Ray (arm64)
+RUN python -m pip install --no-cache-dir 'ray[default]==2.37.0'
 
 ENTRYPOINT ["/opt/observability/init-run.sh"]
 CMD ["sleep", "infinity"]

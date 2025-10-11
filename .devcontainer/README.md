@@ -1,9 +1,20 @@
-# Devcontainer Guide (Observability + Slice-Bench Integration)
+# Devcontainer + Observability Guide
 
-This guide describes the `sglang-dev` observability helper container, its
-bundled services, storage layout, lifecycle scripts, and the manifest contract
-consumed by Slice-Bench during development. The container runs on the host
-network so every exposed port is reachable without additional `docker` flags.
+This guide documents the current, working container workflow for SGLang
+development on GH200, including the observability helper container, storage
+layout, editable installs, and how to run cache preparation. It reflects the
+repository state as of 2025‑10‑11.
+
+There are two viable flows:
+
+- Helper container (recommended): launch via `scripts/start_observable_container.sh`.
+  This creates a runtime container named `sglang-dev` and binds host storage
+  under `$HOME/sglang-observability`. It is optimized for iterative dev and
+  observability (Prometheus/Jaeger exporters).
+
+- VS Code Devcontainer (optional): open the repo in a devcontainer using
+  `.devcontainer/devcontainer.json`. This uses `.devcontainer/storage/*` mounts
+  and VS Code’s lifecycle. It is not required when using the helper container.
 
 ## Components & Ports
 
@@ -13,11 +24,13 @@ network so every exposed port is reachable without additional `docker` flags.
 | Jaeger UI/OTLP   | 16686 / 4317 / 4318 | `.devcontainer/storage/jaeger/<run>/badger/{key,data}` |
 | node_exporter    | 9100         | n/a (metrics only)                            |
 | dcgm-exporter    | 9400         | n/a (metrics only)                            |
-| SGLang server    | 30000 (router 29000) | user-launched; logs under `.devcontainer/storage/logs/` |
+| SGLang server    | 30000 (router 29000) | user-launched; logs under `$HOME/sglang-observability/telemetry/logs/` |
 
-## Container Startup Flow
+## Helper Container Startup Flow
 
-When the devcontainer starts, `.devcontainer/observability/init-run.sh`:
+When you run `./scripts/start_observable_container.sh`, Docker launches the
+`sglang-dev` container and invokes `/opt/observability/init-run.sh` inside it.
+The init script:
 
 1. Generates a run identifier `container-run-<timestamp>-<id>`.
 2. Writes `/telemetry/container_run_meta.env` containing only pointers to the
@@ -26,36 +39,48 @@ When the devcontainer starts, `.devcontainer/observability/init-run.sh`:
    into it.
 4. Launches Prometheus, Jaeger, node_exporter, dcgm-exporter, and `nv-hostengine`.
 5. Prints the manifest locations to stdout for consumers.
-6. Executes the devcontainer command (`sleep infinity`), keeping the container
-   ready for interactive work.
+6. Exports `PYTHONPATH=/workspaces/sglang/python` and executes an init hook as
+   `devuser` when `INIT_RUN_HOOK` is provided. The start script passes
+   `INIT_RUN_HOOK=/workspaces/sglang/.devcontainer/post-create.sh`.
+7. Runs the container payload (`sleep infinity`) as `devuser`, keeping it ready
+   for interactive work.
 
-## Storage Layout
-
-Running `./.devcontainer/setup-storage.sh` creates the host-side directory
-structure that is bind-mounted into the container:
+The init hook installs SGLang from the bind‑mounted workspace in editable mode
+so imports resolve to your live code:
 
 ```
-.devcontainer/storage/
+pip install -U pip setuptools wheel
+pip install -e /workspaces/sglang/python[tracing]
+```
+
+## Storage Layout (Helper Container)
+
+The helper container uses a single root under your home directory
+`$HOME/sglang-observability` for all mounts:
+
+```
+$HOME/sglang-observability/
   models/                # model checkpoints (durable)
-  huggingface/           # HF caches (durable)
   profiles/
     deep_gemm/
     flashinfer/
     moe_configs/configs/
     torchinductor/
     triton/
-  logs/
-    container-run-*.log  # one container-lifetime log per run
-  container_run_meta.env # pointer to latest manifest (start script also echoes it)
-  container_runs/        # JSON manifest per run (written by init-run.sh)
-  prometheus/            # per-run TSDB directories
-  jaeger/                # per-run badger directories
+    .locks/
+    .in_progress/
+  telemetry/
+    logs/                # one container-lifetime log per run
+    container_run_meta.env  # pointer to latest manifest (touch/remove managed by init-run)
+    container_runs/      # JSON manifest per run (written by init-run.sh)
+    prometheus/          # per-run TSDB directories
+    jaeger/              # per-run badger directories
 ```
 
 Prometheus and Jaeger write to subdirectories named after `CONTAINER_RUN_ID`,
 allowing historical runs to be inspected later.
 
-## Lifecycle Scripts
+## Lifecycle Scripts (Host)
 
 - `scripts/start_observable_container.sh`
   - Launches (or replaces) the `sglang-dev` container.
@@ -69,8 +94,7 @@ allowing historical runs to be inspected later.
     9090/9400/9100/16686/4317/4318) are immediately reachable from the host.
   - Truncates the env pointer before launch so stale run IDs cannot leak
     through.
-  - Rewrites the manifest to add host-relative paths, cache metadata, and
-    telemetry-surface status before printing readiness.
+  - Prints absolute host and container manifest paths when ready.
   - If the manifest contains warnings, they are printed before the “ready” line.
   - Exits non-zero if Docker reports the container stopped or failed; the tail of
     the container log (last 50 lines) is written to stderr for debugging.
@@ -79,8 +103,8 @@ allowing historical runs to be inspected later.
     (`.devcontainer/storage/container_runs`).
 
 - `scripts/stop_observable_container.sh`
-  - Removes the `sglang-dev` container if it exists. Exits 0 if nothing was
-    running. Supports `--help` for usage text.
+  - Removes the `sglang-dev` container if it exists and clears the manifest
+    pointer file on the host.
 
 Both scripts assume Slice-Bench (or the user) runs them from the repository root
 so relative paths resolve correctly.
@@ -94,9 +118,8 @@ Every container lifetime produces:
 - Jaeger storage: `/telemetry/jaeger/<CONTAINER_RUN_ID>/badger/{key,data}`
 - Manifest: `/telemetry/container_runs/<CONTAINER_RUN_ID>.json`
 
-`/telemetry/container_run_meta.env` (mounted at
-`.devcontainer/storage/container_run_meta.env`) now only contains the manifest
-pointers:
+`/telemetry/container_run_meta.env` (host: `$HOME/sglang-observability/telemetry/container_run_meta.env`)
+contains the manifest pointers:
 
 ```
 CONTAINER_RUN_META_JSON=/telemetry/container_runs/container-run-...
@@ -123,14 +146,14 @@ container path otherwise.
 - `warnings` retains the authoritative list of degradations; your automation
   should continue to gate on an empty list unless a test requires otherwise.
 
-## Launching SGLang
+## Launching SGLang (from Host)
 
 Because the init script already captures stdout/stderr, launch SGLang after
 reading the manifest pointer at `.devcontainer/storage/container_run_meta.env`:
 
 ```bash
 # On the host
-RUN_META=.devcontainer/storage/container_run_meta.env
+RUN_META=$HOME/sglang-observability/telemetry/container_run_meta.env
 
 # Prefer absolute host path when provided, fall back to the container path.
 MANIFEST_PATH=$(awk -F= '/CONTAINER_RUN_META_JSON_HOST/{print $2}' "$RUN_META")
@@ -140,16 +163,16 @@ fi
 
 LOG_FILE=$(jq -r '.storage.log_file' "$MANIFEST_PATH")
 
-docker exec -d sglang-dev bash -lc "
+docker exec -d -u devuser sglang-dev bash -lc "
   python -m sglang.launch_server \\
-    --model-path /models/Qwen2.5-7B-Instruct-1M \\
+    --model-path /models/Qwen/Qwen3-Next-80B-A3B-Thinking-FP8 \\
     --context-length 32768 \\
     --max-running-requests 1 \\
     --max-total-tokens 32768 \\
     --host 0.0.0.0 --port 30000 \\
     --enable-metrics \\
-    --tensor-parallel-size 1 \\
-    --disable-cuda-graph >> '$LOG_FILE' 2>&1 &"
+    --tp-size 1 \\
+    --trust-remote-code >> '$LOG_FILE' 2>&1 &"
 ```
 
 Each container lifetime emits a fresh log file in `.devcontainer/storage/logs/`
@@ -197,7 +220,29 @@ and `telemetry_surfaces.*.status` will reflect `failed`.
 4. After workloads finish, call `./scripts/stop_observable_container.sh`.
 5. Inspect logs / metrics / traces under `.devcontainer/storage/*` as needed.
 
-## Notes
+## Editable Install & PYTHONPATH
+
+- The helper exports `PYTHONPATH=/workspaces/sglang/python` for all processes.
+- The init hook installs SGLang in editable mode from the bind‑mounted repo so
+  imports point to `/workspaces/sglang/python/sglang/...`.
+- You can verify with:
+
+```
+docker exec -i -u devuser sglang-dev python - <<'PY'
+from inspect import signature
+import sglang
+print('sglang file:', sglang.__file__)
+from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import get_config_file_name, get_moe_configs
+print('get_config_file_name:', signature(get_config_file_name))
+print('get_moe_configs:', signature(get_moe_configs))
+PY
+```
+
+## Cache Preparation (MoE / FlashInfer / Inductor)
+
+Use the admin CLI under `.devcontainer/tools/` to inspect or prepare caches
+inside the container. See `README_tools.md` in that directory for details.
+
 
 - Multiple benchmarks may reuse the same container run; record the run ID in
   benchmark artefacts for traceability.

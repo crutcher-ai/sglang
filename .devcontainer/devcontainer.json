@@ -19,7 +19,6 @@
     ],
     "mounts": [
         "source=${localWorkspaceFolder}/.devcontainer/storage/models,target=/models,type=bind",
-        "source=${localWorkspaceFolder}/.devcontainer/storage/huggingface,target=/home/devuser/.cache/huggingface,type=bind",
         "source=${localWorkspaceFolder}/.devcontainer/storage/profiles,target=/profiles,type=bind",
         "source=${localWorkspaceFolder}/.devcontainer/storage/logs,target=/telemetry/logs,type=bind",
         "source=${localWorkspaceFolder}/.devcontainer/storage/prometheus,target=/telemetry/prometheus,type=bind",

@@ -20,9 +20,14 @@ EOF
   esac
 done
 
-CONTAINER_NAME="sglang-dev"
+CONTAINER_NAME="${CONTAINER_NAME:-sglang-dev}"
 
-if docker ps -aq -f name="${CONTAINER_NAME}" >/dev/null 2>&1; then
+existing_cid=$(docker ps -aq -f name="^${CONTAINER_NAME}$" || true)
+if [[ -n "${existing_cid}" ]]; then
   docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
   echo "${CONTAINER_NAME}" stopped.
 fi
+
+HOST_OBS_ROOT="${HOST_OBS_ROOT:-$HOME/sglang-observability}"
+RUN_META_FILE="${HOST_OBS_ROOT}/telemetry/container_run_meta.env"
+rm -f "${RUN_META_FILE}" >/dev/null 2>&1 || true

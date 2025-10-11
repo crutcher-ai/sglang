@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "deep_gemm": {
+    "compile_timeout_s": 3600,
+    "lock_timeout_s": 600,
+    "mem_fraction_static": 0.94,
+    "enable_metrics": false,
+    "enable_trace": false
+  },
+  "moe": {
+    "batch_sizes": [
+      512,
+      4096
+    ],
+    "lock_timeout_s": 600
+  },
+  "flashinfer": {
+    "warmup_timeout_s": 600
+  },
+  "inductor": {
+    "warmup_timeout_s": 900
+  }
+}
