@@ -100,20 +100,29 @@ CTX=$(val "$cfg_json" ctx)
 MAXP=$(val "$cfg_json" maxp)
 MAXT=$(val "$cfg_json" maxt)
 
-# Start server in the container
-docker exec -u devuser "$CONTAINER_NAME" bash -lc "\
+# Start server in the container (avoid Bash @Q quoting; pass env vars instead)
+docker exec -u devuser \
+  -e MODEL="$MODEL" \
+  -e MEM="$MEM" \
+  -e KV="$KV" \
+  -e CHUNK="$CHUNK" \
+  -e CTX="$CTX" \
+  -e MAXP="$MAXP" \
+  -e MAXT="$MAXT" \
+  -e LOG_FILE="$LOG_FILE" \
+  "$CONTAINER_NAME" bash -lc "\
   nohup python -m sglang.launch_server \\
-    --model-path ${MODEL@Q} \\
+    --model-path \"\$MODEL\" \\
     --host 0.0.0.0 --port $HOST_PORT \\
     --tp-size $TP_SIZE \\
-    ${MEM:+--mem-fraction-static $MEM} \\
-    ${KV:+--kv-cache-dtype $KV} \\
-    ${CHUNK:+--chunked-prefill-size $CHUNK} \\
-    ${CTX:+--context-length $CTX} \\
-    ${MAXP:+--max-prefill-tokens $MAXP} \\
-    ${MAXT:+--max-total-tokens $MAXT} \\
+    \${MEM:+--mem-fraction-static \"\$MEM\"} \\
+    \${KV:+--kv-cache-dtype \"\$KV\"} \\
+    \${CHUNK:+--chunked-prefill-size \"\$CHUNK\"} \\
+    \${CTX:+--context-length \"\$CTX\"} \\
+    \${MAXP:+--max-prefill-tokens \"\$MAXP\"} \\
+    \${MAXT:+--max-total-tokens \"\$MAXT\"} \\
     --enable-metrics --trust-remote-code \\
-    >> ${LOG_FILE@Q} 2>&1 & disown" >/dev/null
+    >> \"\$LOG_FILE\" 2>&1 & disown" >/dev/null
 
 # Poll readiness (45s max)
 deadline=$((SECONDS+45))

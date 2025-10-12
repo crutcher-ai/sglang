@@ -48,10 +48,12 @@ server). The harness uses OpenAI‑compatible Chat Completions exclusively.
   "test_id": "os1",
   "status": "ok|http_error|timeout|schema_error",
   "http_status": 200,
-  "stop_reason": "stop|length|abort",
+  "stop_reason": "stop|length|…",  # from OpenAI finish_reason
   "usage": {"prompt_tokens": 312, "completion_tokens": 420},
   "timings": {"start_ts": "…Z", "end_ts": "…Z", "total_latency_ms": 1842},
   "request_snapshot": {
+    "base_url": "http://127.0.0.1:30000/v1",
+    "model_id": "local",
     "system": "…", "context": "…", "prompt": "…",
     "sampling": {"temperature": 0.6, "top_p": 0.95, "max_tokens": 1024},
     "thinking_hint": "qwen-thinking|null"
@@ -75,6 +77,13 @@ server). The harness uses OpenAI‑compatible Chat Completions exclusively.
 - Instruct model: `temperature=0.7`, `top_p=0.8`.
 - No “reasoning budget” knob is set; none is available in open‑source stacks.
 
+## Notes
+
+- When the server provides a split field (e.g., `message.reasoning_content`),
+  the client prefers that over text splitting by `</think>`.
+- The health/networking model assumes the container is reachable on
+  `127.0.0.1:<PORT>` (host networking or an equivalent mapping).
+
 ## Filesystem Layout (artifacts)
 
 Artifacts for each test are written under the active run directory reported by
@@ -87,4 +96,3 @@ $HOME/sglang-observability/telemetry/container_runs/
       transcript.json  # raw + split
       metrics.json     # usage + timings + status
 ```
-

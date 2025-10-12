@@ -53,7 +53,7 @@ def run_scenario(args: argparse.Namespace) -> int:
     temperature = float(defaults.get("temperature", 0.6))
     top_p = float(defaults.get("top_p", 0.95))
     max_tokens = int(defaults.get("max_tokens", 1024))
-    thinking_hint = "qwen-thinking" if defaults.get("qwen_enable_thinking", True) else "none"
+    default_hint = "qwen-thinking" if defaults.get("qwen_enable_thinking", True) else "none"
 
     client = OpenAI(base_url=base_url, api_key=args.api_key)
     run_id, manifest_host, log_file = _load_manifest_paths()
@@ -68,6 +68,7 @@ def run_scenario(args: argparse.Namespace) -> int:
         context = test.get("context")
         prompt = test.get("prompt") or ""
         ov = test.get("overrides") or {}
+        hint = (ov.get("thinking_hint") or default_hint)
         t = float(ov.get("temperature", temperature))
         p = float(ov.get("top_p", top_p))
         mt = int(ov.get("max_tokens", max_tokens))
@@ -87,8 +88,12 @@ def run_scenario(args: argparse.Namespace) -> int:
             if raw is None:
                 raw = ""
             r, c = (None, raw)
-            if thinking_hint == "qwen-thinking":
-                r, c = _think_split_qwen(raw)
+            if hint == "qwen-thinking":
+                rc = getattr(choice.message, "reasoning_content", None)
+                if isinstance(rc, str) and rc.strip():
+                    r, c = rc, raw
+                else:
+                    r, c = _think_split_qwen(raw)
             usage = getattr(resp, "usage", None)
             usage_obj = None
             if usage is not None:
@@ -113,6 +118,7 @@ def run_scenario(args: argparse.Namespace) -> int:
         cid = conv.get("id") or "conv"
         context = conv.get("context")
         ov = conv.get("overrides") or {}
+        hint = (ov.get("thinking_hint") or default_hint)
         t = float(ov.get("temperature", temperature))
         p = float(ov.get("top_p", top_p))
         mt = int(ov.get("max_tokens", max_tokens))
@@ -137,8 +143,12 @@ def run_scenario(args: argparse.Namespace) -> int:
                 if raw is None:
                     raw = ""
                 r, c = (None, raw)
-                if thinking_hint == "qwen-thinking":
-                    r, c = _think_split_qwen(raw)
+                if hint == "qwen-thinking":
+                    rc = getattr(choice.message, "reasoning_content", None)
+                    if isinstance(rc, str) and rc.strip():
+                        r, c = rc, raw
+                    else:
+                        r, c = _think_split_qwen(raw)
                 # Record full round in history: user then assistant (content-only)
                 history.append({"role": "user", "content": prompt})
                 history.append({"role": "assistant", "content": c})
