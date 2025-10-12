@@ -66,6 +66,53 @@ Learn more in the release blogs: [v0.2 blog](https://lmsys.org/blog/2024-07-25-s
 ## Roadmap
 [Development Roadmap (2025 H2)](https://github.com/sgl-project/sglang/issues/7736)
 
+## Devcontainer & Observability Helpers (GH200)
+
+For provider‑style benchmarking and cache preparation, this repo includes a
+GH200‑focused devcontainer image and a small set of host helpers that manage a
+single SGLang server per container (one container → one server). The helpers are
+OpenAI‑compatible and use the Chat Completions API.
+
+Quick links
+- Devcontainer guide: `.devcontainer/README.md`
+- Inference harness: `docs/inference_harness.md`
+
+Key host scripts
+- `scripts/start_observable_container.sh` / `scripts/stop_observable_container.sh`
+  - Launch/stop the container, write a per‑run manifest under
+    `$HOME/sglang-observability/telemetry/container_runs/`, and a pointer file at
+    `$HOME/sglang-observability/telemetry/container_run_meta.env`.
+  - The manifest records the run ID, container log file, Prometheus/Jaeger
+    paths, and basic exporter health.
+- `scripts/cache/inspect_caches.sh`
+  - Read the manifest pointer and print a JSON snapshot for Triton/Inductor/
+    FlashInfer/DeepGEMM caches under `$HOME/sglang-observability/profiles/`.
+- `scripts/cache/populate_caches.sh`
+  - Forward flags to the in‑container cache admin CLI
+    (`.devcontainer/tools/sgl_admin.py`) to prepare caches.
+
+Inference helpers (chat‑only)
+- `scripts/infer/start_server.sh` / `scripts/infer/status.sh` / `scripts/infer/stop_server.sh`
+  - Start/health‑check/stop the SGLang server inside the container as `devuser`.
+  - Health endpoint: `http://127.0.0.1:30000/get_model_info`.
+- `tools/infer_client.py` (one‑shot)
+  - Minimal client that sends a single Chat Completions request and writes
+    per‑test artifacts under the active run directory:
+    `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/inference/<test_id>/`.
+  - For Qwen "Thinking" models, splits `<think>…</think>` client‑side and keeps
+    continuation content‑only.
+- `tools/infer_runner.py` (scenario)
+  - Execute a scenario (YAML/JSON) of one‑shot and multi‑turn tests. Emits
+    NDJSON on stdout and writes per‑test transcripts/metrics under the current
+    run.
+
+Networking & paths
+- The container runs with host networking; helpers address the server at
+  `http://127.0.0.1:30000/` by default.
+- Observability roots live under `$HOME/sglang-observability` on the host. The
+  pointer file at `telemetry/container_run_meta.env` always indicates the active
+  run’s manifest and log file.
+
 ## Adoption and Sponsorship
 SGLang has been deployed at large scale, generating trillions of tokens in production each day. It is trusted and adopted by a wide range of leading enterprises and institutions, including xAI, AMD, NVIDIA, Intel, LinkedIn, Cursor, Oracle Cloud, Google Cloud, Microsoft Azure, AWS, Atlas Cloud, Voltage Park, Nebius, DataCrunch, Novita, InnoMatrix, MIT, UCLA, the University of Washington, Stanford, UC Berkeley, Tsinghua University, Jam & Tea Studios, Baseten, and other major technology organizations across North America and Asia. As an open-source LLM inference engine, SGLang has become the de facto industry standard, with deployments running on over 1,000,000 GPUs worldwide.
 
