@@ -19,6 +19,10 @@ CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-}"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-}"
 MAX_PREFILL_TOKENS="${MAX_PREFILL_TOKENS:-}"
 MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-}"
+MAX_MAMBA_CACHE_SIZE="${MAX_MAMBA_CACHE_SIZE:-}"
+# Optional tracing toggles
+ENABLE_TRACE="${ENABLE_TRACE:-}"
+OLTP_TRACES_ENDPOINT="${OLTP_TRACES_ENDPOINT:-}"
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -75,6 +79,9 @@ print(json.dumps({
   "ctx": os.environ.get("CONTEXT_LENGTH") or server_cfg.get("context_length"),
   "maxp": os.environ.get("MAX_PREFILL_TOKENS") or server_cfg.get("max_prefill_tokens"),
   "maxt": os.environ.get("MAX_TOTAL_TOKENS") or server_cfg.get("max_total_tokens"),
+  "mamba": os.environ.get("MAX_MAMBA_CACHE_SIZE") or server_cfg.get("max_mamba_cache_size"),
+  "trace": os.environ.get("ENABLE_TRACE") or server_cfg.get("enable_trace"),
+  "otlp": os.environ.get("OLTP_TRACES_ENDPOINT") or server_cfg.get("oltp_traces_endpoint"),
 }))
 PY'
 
@@ -87,10 +94,13 @@ read_cfg() {
     -e CONTEXT_LENGTH="$CONTEXT_LENGTH" \
     -e MAX_PREFILL_TOKENS="$MAX_PREFILL_TOKENS" \
     -e MAX_TOTAL_TOKENS="$MAX_TOTAL_TOKENS" \
+    -e MAX_MAMBA_CACHE_SIZE="$MAX_MAMBA_CACHE_SIZE" \
+    -e ENABLE_TRACE="$ENABLE_TRACE" \
+    -e OLTP_TRACES_ENDPOINT="$OLTP_TRACES_ENDPOINT" \
     "$CONTAINER_NAME" bash -lc "$read_cfg_py" 2>/dev/null || echo '{}'
 }
 
-cfg_json=$(MODEL_PATH="$MODEL_PATH" KV_CACHE_DTYPE="$KV_CACHE_DTYPE" MEM_FRACTION_STATIC="$MEM_FRACTION_STATIC" CHUNKED_PREFILL_SIZE="$CHUNKED_PREFILL_SIZE" CONTEXT_LENGTH="$CONTEXT_LENGTH" MAX_PREFILL_TOKENS="$MAX_PREFILL_TOKENS" MAX_TOTAL_TOKENS="$MAX_TOTAL_TOKENS" read_cfg)
+cfg_json=$(MODEL_PATH="$MODEL_PATH" KV_CACHE_DTYPE="$KV_CACHE_DTYPE" MEM_FRACTION_STATIC="$MEM_FRACTION_STATIC" CHUNKED_PREFILL_SIZE="$CHUNKED_PREFILL_SIZE" CONTEXT_LENGTH="$CONTEXT_LENGTH" MAX_PREFILL_TOKENS="$MAX_PREFILL_TOKENS" MAX_TOTAL_TOKENS="$MAX_TOTAL_TOKENS" MAX_MAMBA_CACHE_SIZE="$MAX_MAMBA_CACHE_SIZE" ENABLE_TRACE="$ENABLE_TRACE" OLTP_TRACES_ENDPOINT="$OLTP_TRACES_ENDPOINT" read_cfg)
 
 val() { python3 - "$@" << 'PY'
 import json,sys
@@ -106,6 +116,9 @@ CHUNK=$(val "$cfg_json" chunk)
 CTX=$(val "$cfg_json" ctx)
 MAXP=$(val "$cfg_json" maxp)
 MAXT=$(val "$cfg_json" maxt)
+MAMBA=$(val "$cfg_json" mamba)
+TRACE=$(val "$cfg_json" trace)
+OTLP=$(val "$cfg_json" otlp)
 
 # Start server in the container (avoid Bash @Q quoting; pass env vars instead)
 docker exec -u devuser \
@@ -116,6 +129,9 @@ docker exec -u devuser \
   -e CTX="$CTX" \
   -e MAXP="$MAXP" \
   -e MAXT="$MAXT" \
+  -e MAMBA="$MAMBA" \
+  -e TRACE="$TRACE" \
+  -e OTLP="$OTLP" \
   -e LOG_FILE="$LOG_FILE" \
   "$CONTAINER_NAME" bash -lc "\
   nohup python -m sglang.launch_server \\
@@ -128,6 +144,9 @@ docker exec -u devuser \
     \${CTX:+--context-length \"\$CTX\"} \\
     \${MAXP:+--max-prefill-tokens \"\$MAXP\"} \\
     \${MAXT:+--max-total-tokens \"\$MAXT\"} \\
+    \${MAMBA:+--max-mamba-cache-size \"\$MAMBA\"} \\
+    \${TRACE:+--enable-trace} \\
+    \${OTLP:+--oltp-traces-endpoint \"\$OTLP\"} \\
     --enable-metrics --trust-remote-code \\
     >> \"\$LOG_FILE\" 2>&1 & disown" >/dev/null
 

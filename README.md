@@ -207,6 +207,10 @@ Prometheus & logs
 Common overrides
 - Health host/port: `HOST=0.0.0.0 PORT=30001 scripts/infer/status.sh`
 - Server context/tokens (at start): `CONTEXT_LENGTH=65536 MAX_TOTAL_TOKENS=65536 scripts/infer/start_server.sh`
+- Mamba cache size (hybrid/Qwen3‑Next): `MAX_MAMBA_CACHE_SIZE=1 scripts/infer/start_server.sh`
+- Tracing (Jaeger via OTLP gRPC):
+  - Enable tracing: `ENABLE_TRACE=1 scripts/infer/start_server.sh`
+  - Optional endpoint override: `OLTP_TRACES_ENDPOINT=localhost:4317 scripts/infer/start_server.sh`
 
 Cleanup & recovery
 - Clean stop & remove pointer: `./scripts/stop_observable_container.sh`

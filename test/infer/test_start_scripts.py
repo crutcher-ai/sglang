@@ -95,7 +95,7 @@ def test_start_server_invokes_docker_with_overrides(
         "shift 2\n"
         "if [[ ! -f $state ]]; then\n"
         "  cat <<'JSON'\n"
-        '{"model": "/models/test", "kv": "fp8_e4m3", "mem": "0.93", "chunk": 1024, "ctx": 8192, "maxp": 8192, "maxt": 8192}\n'
+        '{"model": "/models/test", "kv": "fp8_e4m3", "mem": "0.93", "chunk": 1024, "ctx": 8192, "maxp": 8192, "maxt": 8192, "mamba": 7, "trace": 1, "otlp": "localhost:4317"}\n'
         "JSON\n"
         "  touch $state\n"
         "else\n"
@@ -120,9 +120,16 @@ def test_start_server_invokes_docker_with_overrides(
 
     env = os.environ.copy()
     env.setdefault("READY_TIMEOUT", "0")
+    # Ensure new overrides are forwarded as flags
+    env["MAX_MAMBA_CACHE_SIZE"] = "7"
+    env["ENABLE_TRACE"] = "1"
+    env["OLTP_TRACES_ENDPOINT"] = "localhost:4317"
     proc = run(["bash", str(START_SCRIPT)], text=True, capture_output=True, env=env)
     assert proc.returncode != 0
     assert docker_log.exists()
     recorded = docker_log.read_text().strip()
     assert "--model-path" in recorded
     assert "--mem-fraction-static" in recorded
+    assert "--max-mamba-cache-size" in recorded
+    assert "--enable-trace" in recorded
+    assert "--oltp-traces-endpoint" in recorded
