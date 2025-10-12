@@ -27,8 +27,8 @@
 
 ## MoE Cache
 - Editable install/hooks fixed the earlier helper mismatch; recent runs inside `container-run-20251011T172136Z-db5c775d` succeeded with `moe_tune.status == "ok"`.
-- Sequential ensures added batch sizes 512, 4096, and 8/16/32 into `/profiles/moe_configs/configs/triton_3_4_0/E=512,N=512,device_name=NVIDIA_GH200_480GB,dtype=fp8_w8a8,block_shape=[128, 128].json` (now contains `[8, 16, 32, 512, 4096]`).
-- `stages/moe_tune.json` reflects `available_batch_sizes` matching the file contents and reports the cumulative runtime for each pass (~15–28 minutes).
+- Sequential ensures added the requested batch sizes into `/profiles/moe_configs/configs/triton_3_4_0/E=512,N=512,device_name=NVIDIA_GH200_480GB,dtype=fp8_w8a8,block_shape=[128, 128].json`, which now contains `[2, 4, 8, 16, 32, 48, 64, 96, 128, 256, 512, 1024, 4096]`.
+- `stages/moe_tune.json` captures each pass, including the new batch additions and duration estimates (~16–45 minutes depending on size).
 
 ## Outstanding Work
 1. Run the inference smoke test against the pre-built caches, confirm telemetry probe success, and document Prometheus scrape behaviour for a long-lived server.

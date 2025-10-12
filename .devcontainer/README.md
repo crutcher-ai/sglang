@@ -243,6 +243,12 @@ PY
 Use the admin CLI under `.devcontainer/tools/` to inspect or prepare caches
 inside the container. See `README_tools.md` in that directory for details.
 
+## Inference Harness
+
+For starting/stopping the server and running one‑shot or multi‑turn tests using
+OpenAI Chat Completions, see docs/inference_harness.md. Helpers live under
+`scripts/infer/` and `tools/`.
+
 
 - Multiple benchmarks may reuse the same container run; record the run ID in
   benchmark artefacts for traceability.
