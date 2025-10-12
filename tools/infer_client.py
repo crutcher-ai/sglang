@@ -30,7 +30,9 @@ def _think_split_qwen(text: str) -> Tuple[Optional[str], str]:
 
 
 def _load_manifest_paths() -> Tuple[str, str, str]:
-    host_root = os.environ.get("HOST_OBS_ROOT", os.path.expanduser("~/sglang-observability"))
+    host_root = os.environ.get(
+        "HOST_OBS_ROOT", os.path.expanduser("~/sglang-observability")
+    )
     run_meta = os.path.join(host_root, "telemetry", "container_run_meta.env")
     if not os.path.isfile(run_meta):
         raise RuntimeError(f"manifest pointer not found: {run_meta}")
@@ -47,13 +49,18 @@ def _load_manifest_paths() -> Tuple[str, str, str]:
     run_id = (m.get("run") or {}).get("container_run_id") or m.get("container_run_id")
     if not run_id:
         raise RuntimeError("container_run_id missing in manifest")
-    log_file = ((m.get("storage") or {}).get("log_file"))
+    log_file = (m.get("storage") or {}).get("log_file")
     if not log_file:
         raise RuntimeError("log_file missing in manifest")
     return run_id, manifest_host, log_file
 
 
-def _build_messages(system: Optional[str], context: Optional[str], prompt: str, history: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
+def _build_messages(
+    system: Optional[str],
+    context: Optional[str],
+    prompt: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
     msgs: List[Dict[str, str]] = []
     if system:
         msgs.append({"role": "system", "content": system})
@@ -94,22 +101,37 @@ def _one_shot(args: argparse.Namespace) -> int:
         finished = _iso_now()
         total_ms = int((time.perf_counter() - t0) * 1000)
         out = {
+            "schema_version": 1,
             "test_id": test_id,
             "status": "http_error",
             "http_status": None,
             "stop_reason": None,
             "usage": None,
-            "timings": {"start_ts": started, "end_ts": finished, "total_latency_ms": total_ms},
+            "timings": {
+                "start_ts": started,
+                "end_ts": finished,
+                "total_latency_ms": total_ms,
+            },
             "request_snapshot": {
                 "system": args.system,
                 "context": args.context,
                 "prompt": args.prompt,
-                "sampling": {"temperature": args.temperature, "top_p": args.top_p, "max_tokens": args.max_tokens},
+                "sampling": {
+                    "temperature": args.temperature,
+                    "top_p": args.top_p,
+                    "max_tokens": args.max_tokens,
+                },
                 "thinking_hint": args.thinking_hint,
             },
             "response_snapshot": None,
-            "prom_bookmark": {"container_run_id": run_id, "window": {"start_ts": started, "end_ts": finished}},
-            "container_log_anchor": {"path": log_file, "window": {"start_ts": started, "end_ts": finished}},
+            "prom_bookmark": {
+                "container_run_id": run_id,
+                "window": {"start_ts": started, "end_ts": finished},
+            },
+            "container_log_anchor": {
+                "path": log_file,
+                "window": {"start_ts": started, "end_ts": finished},
+            },
             "error": str(e),
         }
         print(json.dumps(out, ensure_ascii=False))
@@ -146,19 +168,28 @@ def _one_shot(args: argparse.Namespace) -> int:
         }
 
     out = {
+        "schema_version": 1,
         "test_id": test_id,
         "status": "ok",
         "http_status": 200,
         "stop_reason": getattr(choice, "finish_reason", None),
         "usage": usage_obj,
-        "timings": {"start_ts": started, "end_ts": finished, "total_latency_ms": total_ms},
+        "timings": {
+            "start_ts": started,
+            "end_ts": finished,
+            "total_latency_ms": total_ms,
+        },
         "request_snapshot": {
             "base_url": base_url,
             "model_id": args.model_id,
             "system": args.system,
             "context": args.context,
             "prompt": args.prompt,
-            "sampling": {"temperature": args.temperature, "top_p": args.top_p, "max_tokens": args.max_tokens},
+            "sampling": {
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "max_tokens": args.max_tokens,
+            },
             "thinking_hint": args.thinking_hint,
         },
         "response_snapshot": {
@@ -166,8 +197,14 @@ def _one_shot(args: argparse.Namespace) -> int:
             "assistant_reasoning_text": reasoning,
             "assistant_content_text": content,
         },
-        "prom_bookmark": {"container_run_id": run_id, "window": {"start_ts": started, "end_ts": finished}},
-        "container_log_anchor": {"path": log_file, "window": {"start_ts": started, "end_ts": finished}},
+        "prom_bookmark": {
+            "container_run_id": run_id,
+            "window": {"start_ts": started, "end_ts": finished},
+        },
+        "container_log_anchor": {
+            "path": log_file,
+            "window": {"start_ts": started, "end_ts": finished},
+        },
     }
 
     # Write artifacts
@@ -175,19 +212,29 @@ def _one_shot(args: argparse.Namespace) -> int:
     run_dir = Path(manifest_host).parent / "inference" / test_id
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / "transcript.json").open("w", encoding="utf-8") as f:
-        json.dump({
-            "messages": messages,
-            "assistant_text_raw": raw,
-            "assistant_reasoning_text": reasoning,
-            "assistant_content_text": content,
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "messages": messages,
+                "assistant_text_raw": raw,
+                "assistant_reasoning_text": reasoning,
+                "assistant_content_text": content,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     with (run_dir / "metrics.json").open("w", encoding="utf-8") as f:
-        json.dump({
-            "usage": usage_obj,
-            "timings": out["timings"],
-            "status": out["status"],
-            "stop_reason": out["stop_reason"],
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "usage": usage_obj,
+                "timings": out["timings"],
+                "status": out["status"],
+                "stop_reason": out["stop_reason"],
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     print(json.dumps(out, ensure_ascii=False))
     return 0
@@ -208,7 +255,9 @@ def main() -> int:
     one.add_argument("--temperature", type=float, default=0.6)
     one.add_argument("--top-p", type=float, default=0.95)
     one.add_argument("--max-tokens", type=int, default=1024)
-    one.add_argument("--thinking-hint", choices=["qwen-thinking", "none"], default="qwen-thinking")
+    one.add_argument(
+        "--thinking-hint", choices=["qwen-thinking", "none"], default="qwen-thinking"
+    )
 
     args = ap.parse_args()
     if args.cmd == "one-shot":

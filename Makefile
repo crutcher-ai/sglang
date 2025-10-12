@@ -43,5 +43,13 @@ update: ## Update version numbers across project files. Usage: make update <new_
 	done; \
 	echo "Version update complete"
 
+.PHONY: test-plumbing test-plumbing-e2e
+
+test-plumbing: ## Run core helper plumbing unit/integration tests
+	pytest test/infer/test_start_scripts.py test/infer/test_infer_client_runner_endpoints.py test/tools/test_sgl_admin_helpers.py
+
+test-plumbing-e2e: ## Run observability E2E smoke (requires SGL_E2E_CONTAINER_TESTS=1 and model snapshot)
+	pytest test/e2e/test_pointer_and_deepgemm_flow.py
+
 %:
 	@:

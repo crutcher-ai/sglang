@@ -29,28 +29,27 @@ MANIFEST_HOST=$(awk -F= '/^CONTAINER_RUN_META_JSON_HOST=/{print $2}' "$RUN_META_
 [ -n "$MANIFEST_HOST" ] || die "host manifest path missing in pointer"
 [ -f "$MANIFEST_HOST" ] || die "host manifest not found: $MANIFEST_HOST"
 
-RUN_ID=$(python3 - <<'PY'
+RUN_ID=$(python3 - "$MANIFEST_HOST" <<'PY'
 import json,sys
 p=sys.argv[1]
 d=json.load(open(p))
 print((d.get('run') or {}).get('container_run_id') or d.get('container_run_id') or '')
-PY
-"$MANIFEST_HOST")
+PY)
 [ -n "$RUN_ID" ] || die "container_run_id missing in manifest"
 
-LOG_FILE=$(python3 - <<'PY'
+LOG_FILE=$(python3 - "$MANIFEST_HOST" <<'PY'
 import json,sys
 p=sys.argv[1]
 d=json.load(open(p))
 print(((d.get('storage') or {}).get('log_file')) or '')
-PY
-"$MANIFEST_HOST")
+PY)
 [ -n "$LOG_FILE" ] || die "log file missing in manifest"
 
 # If healthy already, print status and exit
 if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
   cat <<EOF
 {
+  "schema_version": 1,
   "run_id": "$RUN_ID",
   "health": "ready",
   "port": $HOST_PORT,
@@ -67,20 +66,28 @@ read_cfg_py='python - <<PY
 import json, os
 cfg = json.load(open("/workspaces/sglang/.devcontainer/tools/sglang-config.json"))
 model = os.environ.get("MODEL_PATH") or (cfg.get("model") or {}).get("default_model_path")
-ser = cfg.get("server") or {}
+server_cfg = cfg.get("server") or {}
 print(json.dumps({
   "model": model,
   "kv": os.environ.get("KV_CACHE_DTYPE") or (cfg.get("model") or {}).get("kv_cache_dtype"),
-  "mem": os.environ.get("MEM_FRACTION_STATIC") or ser.get("mem_fraction_static"),
-  "chunk": os.environ.get("CHUNKED_PREFILL_SIZE") or ser.get("chunked_prefill_size"),
-  "ctx": os.environ.get("CONTEXT_LENGTH") or ser.get("context_length"),
-  "maxp": os.environ.get("MAX_PREFILL_TOKENS") or ser.get("max_prefill_tokens"),
-  "maxt": os.environ.get("MAX_TOTAL_TOKENS") or ser.get("max_total_tokens"),
+  "mem": os.environ.get("MEM_FRACTION_STATIC") or server_cfg.get("mem_fraction_static"),
+  "chunk": os.environ.get("CHUNKED_PREFILL_SIZE") or server_cfg.get("chunked_prefill_size"),
+  "ctx": os.environ.get("CONTEXT_LENGTH") or server_cfg.get("context_length"),
+  "maxp": os.environ.get("MAX_PREFILL_TOKENS") or server_cfg.get("max_prefill_tokens"),
+  "maxt": os.environ.get("MAX_TOTAL_TOKENS") or server_cfg.get("max_total_tokens"),
 }))
 PY'
 
 read_cfg() {
-  docker exec -u devuser "$CONTAINER_NAME" bash -lc "$read_cfg_py" 2>/dev/null || echo '{}'
+  docker exec -u devuser \
+    -e MODEL_PATH="$MODEL_PATH" \
+    -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
+    -e MEM_FRACTION_STATIC="$MEM_FRACTION_STATIC" \
+    -e CHUNKED_PREFILL_SIZE="$CHUNKED_PREFILL_SIZE" \
+    -e CONTEXT_LENGTH="$CONTEXT_LENGTH" \
+    -e MAX_PREFILL_TOKENS="$MAX_PREFILL_TOKENS" \
+    -e MAX_TOTAL_TOKENS="$MAX_TOTAL_TOKENS" \
+    "$CONTAINER_NAME" bash -lc "$read_cfg_py" 2>/dev/null || echo '{}'
 }
 
 cfg_json=$(MODEL_PATH="$MODEL_PATH" KV_CACHE_DTYPE="$KV_CACHE_DTYPE" MEM_FRACTION_STATIC="$MEM_FRACTION_STATIC" CHUNKED_PREFILL_SIZE="$CHUNKED_PREFILL_SIZE" CONTEXT_LENGTH="$CONTEXT_LENGTH" MAX_PREFILL_TOKENS="$MAX_PREFILL_TOKENS" MAX_TOTAL_TOKENS="$MAX_TOTAL_TOKENS" read_cfg)
@@ -124,12 +131,14 @@ docker exec -u devuser \
     --enable-metrics --trust-remote-code \\
     >> \"\$LOG_FILE\" 2>&1 & disown" >/dev/null
 
-# Poll readiness (45s max)
-deadline=$((SECONDS+45))
+# Poll readiness (configurable, default 180s)
+READY_TIMEOUT=${READY_TIMEOUT:-180}
+deadline=$((SECONDS+READY_TIMEOUT))
 while [ $SECONDS -lt $deadline ]; do
   if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
     cat <<EOF
 {
+  "schema_version": 1,
   "run_id": "$RUN_ID",
   "health": "ready",
   "port": $HOST_PORT,

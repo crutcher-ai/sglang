@@ -77,6 +77,10 @@ Quick links
 - Devcontainer guide: `.devcontainer/README.md`
 - Inference harness: `docs/inference_harness.md`
 
+Testing shortcuts
+- `make test-plumbing` — run core helper plumbing unit/integration tests.
+- `SGL_E2E_CONTAINER_TESTS=1 make test-plumbing-e2e` — execute the guarded observability E2E smoke (requires the GH200 container + model snapshot).
+
 Key host scripts
 - `scripts/start_observable_container.sh` / `scripts/stop_observable_container.sh`
   - Launch/stop the container, write a per‑run manifest under

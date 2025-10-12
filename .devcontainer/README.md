@@ -118,6 +118,26 @@ Every container lifetime produces:
 - Jaeger storage: `/telemetry/jaeger/<CONTAINER_RUN_ID>/badger/{key,data}`
 - Manifest: `/telemetry/container_runs/<CONTAINER_RUN_ID>.json`
 
+The manifest now includes a `paths` block with both container and host views so automation does not need to guess
+mount locations:
+
+```json
+"paths": {
+  "container": {
+    "telemetry_root": "/telemetry",
+    "log_file": "/telemetry/logs/<RUN>.log",
+    "prometheus_dir": "/telemetry/prometheus/<RUN>"
+  },
+  "host": {
+    "telemetry_root": "$HOST_TELEMETRY_ROOT",
+    "log_file": "$HOST_TELEMETRY_ROOT/logs/<RUN>.log",
+    "prometheus_dir": "$HOST_TELEMETRY_ROOT/prometheus/<RUN>"
+  }
+}
+```
+
+SLICE‑Bench (and other tooling) should always prefer `paths.host.*` when slicing logs or wiring Prometheus/Jaeger exports.
+
 `/telemetry/container_run_meta.env` (host: `$HOME/sglang-observability/telemetry/container_run_meta.env`)
 contains the manifest pointers:
 

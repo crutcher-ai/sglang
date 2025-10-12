@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from infer_client import _think_split_qwen, _load_manifest_paths  # reuse helpers
+from infer_client import _load_manifest_paths, _think_split_qwen  # reuse helpers
 
 
 def _iso_now() -> str:
@@ -26,7 +26,12 @@ def _load_scenario(path: str) -> Dict[str, Any]:
         return json.loads(txt)
 
 
-def _build_messages(system: Optional[str], context: Optional[str], history: List[Dict[str, str]], prompt: str) -> List[Dict[str, str]]:
+def _build_messages(
+    system: Optional[str],
+    context: Optional[str],
+    history: List[Dict[str, str]],
+    prompt: str,
+) -> List[Dict[str, str]]:
     msgs: List[Dict[str, str]] = []
     if system:
         msgs.append({"role": "system", "content": system})
@@ -53,14 +58,19 @@ def run_scenario(args: argparse.Namespace) -> int:
     temperature = float(defaults.get("temperature", 0.6))
     top_p = float(defaults.get("top_p", 0.95))
     max_tokens = int(defaults.get("max_tokens", 1024))
-    default_hint = "qwen-thinking" if defaults.get("qwen_enable_thinking", True) else "none"
+    default_hint = (
+        "qwen-thinking" if defaults.get("qwen_enable_thinking", True) else "none"
+    )
 
     client = OpenAI(base_url=base_url, api_key=args.api_key)
     run_id, manifest_host, log_file = _load_manifest_paths()
 
     # NDJSON stream of results
     def emit(obj: Dict[str, Any]):
-        print(json.dumps(obj, ensure_ascii=False), flush=True)
+        # Ensure schema version present in every emitted record
+        rec = dict(obj)
+        rec.setdefault("schema_version", 1)
+        print(json.dumps(rec, ensure_ascii=False), flush=True)
 
     # One-shot tests
     for test in sc.get("one_shot", []) or []:
@@ -68,7 +78,7 @@ def run_scenario(args: argparse.Namespace) -> int:
         context = test.get("context")
         prompt = test.get("prompt") or ""
         ov = test.get("overrides") or {}
-        hint = (ov.get("thinking_hint") or default_hint)
+        hint = ov.get("thinking_hint") or default_hint
         t = float(ov.get("temperature", temperature))
         p = float(ov.get("top_p", top_p))
         mt = int(ov.get("max_tokens", max_tokens))
@@ -97,19 +107,39 @@ def run_scenario(args: argparse.Namespace) -> int:
             usage = getattr(resp, "usage", None)
             usage_obj = None
             if usage is not None:
-                usage_obj = {"prompt_tokens": getattr(usage, "prompt_tokens", None), "completion_tokens": getattr(usage, "completion_tokens", None)}
-            emit({
-                "test_id": tid,
-                "status": "ok",
-                "http_status": 200,
-                "stop_reason": getattr(choice, "finish_reason", None),
-                "usage": usage_obj,
-                "timings": {"start_ts": started, "end_ts": _iso_now()},
-                "request_snapshot": {"system": system, "context": context, "prompt": prompt, "sampling": {"temperature": t, "top_p": p, "max_tokens": mt}},
-                "response_snapshot": {"assistant_text_raw": raw, "assistant_reasoning_text": r, "assistant_content_text": c},
-                "prom_bookmark": {"container_run_id": run_id, "window": {"start_ts": started, "end_ts": _iso_now()}},
-                "container_log_anchor": {"path": log_file, "window": {"start_ts": started, "end_ts": _iso_now()}},
-            })
+                usage_obj = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                    "completion_tokens": getattr(usage, "completion_tokens", None),
+                }
+            emit(
+                {
+                    "test_id": tid,
+                    "status": "ok",
+                    "http_status": 200,
+                    "stop_reason": getattr(choice, "finish_reason", None),
+                    "usage": usage_obj,
+                    "timings": {"start_ts": started, "end_ts": _iso_now()},
+                    "request_snapshot": {
+                        "system": system,
+                        "context": context,
+                        "prompt": prompt,
+                        "sampling": {"temperature": t, "top_p": p, "max_tokens": mt},
+                    },
+                    "response_snapshot": {
+                        "assistant_text_raw": raw,
+                        "assistant_reasoning_text": r,
+                        "assistant_content_text": c,
+                    },
+                    "prom_bookmark": {
+                        "container_run_id": run_id,
+                        "window": {"start_ts": started, "end_ts": _iso_now()},
+                    },
+                    "container_log_anchor": {
+                        "path": log_file,
+                        "window": {"start_ts": started, "end_ts": _iso_now()},
+                    },
+                }
+            )
         except Exception as e:
             emit({"test_id": tid, "status": "http_error", "error": str(e)})
 
@@ -118,7 +148,7 @@ def run_scenario(args: argparse.Namespace) -> int:
         cid = conv.get("id") or "conv"
         context = conv.get("context")
         ov = conv.get("overrides") or {}
-        hint = (ov.get("thinking_hint") or default_hint)
+        hint = ov.get("thinking_hint") or default_hint
         t = float(ov.get("temperature", temperature))
         p = float(ov.get("top_p", top_p))
         mt = int(ov.get("max_tokens", max_tokens))
@@ -139,7 +169,9 @@ def run_scenario(args: argparse.Namespace) -> int:
                 choice = resp.choices[0]
                 raw = getattr(choice.message, "content", None)
                 if isinstance(raw, list):
-                    raw = "".join([x.get("text") or "" for x in raw if isinstance(x, dict)])
+                    raw = "".join(
+                        [x.get("text") or "" for x in raw if isinstance(x, dict)]
+                    )
                 if raw is None:
                     raw = ""
                 r, c = (None, raw)
@@ -155,29 +187,60 @@ def run_scenario(args: argparse.Namespace) -> int:
                 usage = getattr(resp, "usage", None)
                 usage_obj = None
                 if usage is not None:
-                    usage_obj = {"prompt_tokens": getattr(usage, "prompt_tokens", None), "completion_tokens": getattr(usage, "completion_tokens", None)}
-                emit({
-                    "test_id": f"{cid}:{i+1}",
-                    "status": "ok",
-                    "http_status": 200,
-                    "stop_reason": getattr(choice, "finish_reason", None),
-                    "usage": usage_obj,
-                    "timings": {"start_ts": started, "end_ts": _iso_now()},
-                    "request_snapshot": {"system": system, "context": context, "prompt": prompt, "sampling": {"temperature": t, "top_p": p, "max_tokens": mt}},
-                    "response_snapshot": {"assistant_text_raw": raw, "assistant_reasoning_text": r, "assistant_content_text": c},
-                    "prom_bookmark": {"container_run_id": run_id, "window": {"start_ts": started, "end_ts": _iso_now()}},
-                    "container_log_anchor": {"path": log_file, "window": {"start_ts": started, "end_ts": _iso_now()}},
-                })
+                    usage_obj = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                        "completion_tokens": getattr(usage, "completion_tokens", None),
+                    }
+                emit(
+                    {
+                        "test_id": f"{cid}:{i+1}",
+                        "status": "ok",
+                        "http_status": 200,
+                        "stop_reason": getattr(choice, "finish_reason", None),
+                        "usage": usage_obj,
+                        "timings": {"start_ts": started, "end_ts": _iso_now()},
+                        "request_snapshot": {
+                            "system": system,
+                            "context": context,
+                            "prompt": prompt,
+                            "sampling": {
+                                "temperature": t,
+                                "top_p": p,
+                                "max_tokens": mt,
+                            },
+                        },
+                        "response_snapshot": {
+                            "assistant_text_raw": raw,
+                            "assistant_reasoning_text": r,
+                            "assistant_content_text": c,
+                        },
+                        "prom_bookmark": {
+                            "container_run_id": run_id,
+                            "window": {"start_ts": started, "end_ts": _iso_now()},
+                        },
+                        "container_log_anchor": {
+                            "path": log_file,
+                            "window": {"start_ts": started, "end_ts": _iso_now()},
+                        },
+                    }
+                )
             except Exception as e:
-                emit({"test_id": f"{cid}:{i+1}", "status": "http_error", "error": str(e)})
+                emit(
+                    {"test_id": f"{cid}:{i+1}", "status": "http_error", "error": str(e)}
+                )
                 ok = False
                 break
-        emit({
-            "test_id": cid,
-            "status": "ok" if ok else "partial",
-            "policy_applied": "content-only continuation",
-            "prom_bookmark": {"container_run_id": run_id, "window": {"start_ts": started_conv, "end_ts": _iso_now()}},
-        })
+        emit(
+            {
+                "test_id": cid,
+                "status": "ok" if ok else "partial",
+                "policy_applied": "content-only continuation",
+                "prom_bookmark": {
+                    "container_run_id": run_id,
+                    "window": {"start_ts": started_conv, "end_ts": _iso_now()},
+                },
+            }
+        )
 
     return 0
 

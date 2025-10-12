@@ -25,6 +25,7 @@ app.add_typer(caches_app, name="caches")
 
 logger = logging.getLogger(__name__)
 
+
 def _default_tools_dir() -> Path:
     return Path(__file__).resolve().parent
 
@@ -35,7 +36,9 @@ def _load_json_config(env_var: str, default_name: str) -> Dict[str, Any]:
         path = str(_default_tools_dir() / default_name)
     p = Path(path)
     if not p.exists():
-        raise RuntimeError(f"Required config file not found: {path}. This file is required for cache operations.")
+        raise RuntimeError(
+            f"Required config file not found: {path}. This file is required for cache operations."
+        )
     try:
         with p.open("r", encoding="utf-8") as f:
             return json.load(f)
@@ -62,7 +65,9 @@ def version():
 
 
 def _read_env_ptr() -> Path:
-    env_path = Path(os.environ.get("RUN_META_FILE", "/telemetry/container_run_meta.env"))
+    env_path = Path(
+        os.environ.get("RUN_META_FILE", "/telemetry/container_run_meta.env")
+    )
     return env_path
 
 
@@ -142,9 +147,21 @@ def _device_info() -> Dict[str, str]:
     driver_version = "unknown"
     cuda = "unknown"
     try:
-        out = subprocess.check_output(["bash", "-lc", "nvidia-smi | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -1"])  # noqa: E501
+        out = subprocess.check_output(
+            [
+                "bash",
+                "-lc",
+                "nvidia-smi | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -1",
+            ]
+        )  # noqa: E501
         cuda = out.decode().strip() or "unknown"
-        out = subprocess.check_output(["bash", "-lc", "nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1"])  # noqa: E501
+        out = subprocess.check_output(
+            [
+                "bash",
+                "-lc",
+                "nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1",
+            ]
+        )  # noqa: E501
         driver_version = out.decode().strip() or "unknown"
     except Exception:
         pass
@@ -193,7 +210,9 @@ def _prepare_env() -> Dict[str, str]:
         try:
             p.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            raise RuntimeError(f"Failed to create cache directory {p}: {e}. Ensure the directory is writable by devuser.") from e
+            raise RuntimeError(
+                f"Failed to create cache directory {p}: {e}. Ensure the directory is writable by devuser."
+            ) from e
 
     # Enforce single FlashInfer JIT log path via symlink (fail-fast)
     jit_target = Path(env["FLASHINFER_JIT_LOG_DIR"]).resolve()
@@ -211,15 +230,22 @@ def _prepare_env() -> Dict[str, str]:
                 try:
                     home_jit.unlink()
                 except Exception as e:
-                    raise RuntimeError(f"Failed to remove stale FlashInfer symlink at {home_jit}: {e}") from e
+                    raise RuntimeError(
+                        f"Failed to remove stale FlashInfer symlink at {home_jit}: {e}"
+                    ) from e
             else:
                 # Preserve previous contents before replacing with symlink
                 backup_suffix = time.strftime("%Y%m%dT%H%M%S")
-                backup_path = home_jit.parent / f"{home_jit.name}.previous-{backup_suffix}"
+                backup_path = (
+                    home_jit.parent / f"{home_jit.name}.previous-{backup_suffix}"
+                )
                 counter = 0
                 while backup_path.exists():
                     counter += 1
-                    backup_path = home_jit.parent / f"{home_jit.name}.previous-{backup_suffix}-{counter}"
+                    backup_path = (
+                        home_jit.parent
+                        / f"{home_jit.name}.previous-{backup_suffix}-{counter}"
+                    )
                 try:
                     home_jit.rename(backup_path)
                 except Exception as e:
@@ -231,18 +257,24 @@ def _prepare_env() -> Dict[str, str]:
             home_jit.parent.mkdir(parents=True, exist_ok=True)
             home_jit.symlink_to(jit_target)
         except Exception as e:
-            raise RuntimeError(f"Failed to create FlashInfer JIT symlink at {home_jit}: {e}") from e
+            raise RuntimeError(
+                f"Failed to create FlashInfer JIT symlink at {home_jit}: {e}"
+            ) from e
 
     # Ensure JIT log file is writable - fail if not
     jit_log = home_jit / "flashinfer_jit.log"
     if jit_log.exists() and not os.access(str(jit_log), os.W_OK):
-        raise RuntimeError(f"FlashInfer JIT log {jit_log} exists but is not writable. Check ownership.")
+        raise RuntimeError(
+            f"FlashInfer JIT log {jit_log} exists but is not writable. Check ownership."
+        )
     if not jit_log.exists():
         try:
             with open(jit_log, "a", encoding="utf-8"):
                 pass
         except Exception as e:
-            raise RuntimeError(f"Failed to create FlashInfer JIT log {jit_log}: {e}") from e
+            raise RuntimeError(
+                f"Failed to create FlashInfer JIT log {jit_log}: {e}"
+            ) from e
     return env
 
 
@@ -268,7 +300,9 @@ def _extract_server_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
         "max_total_tokens": int(_require(server_cfg, "max_total_tokens")),
         "max_mamba_cache_size": int(server_cfg.get("max_mamba_cache_size", 1)),
     }
-    defaults["default_model_path"] = (model_cfg.get("default_model_path") or "").strip() or None
+    defaults["default_model_path"] = (
+        model_cfg.get("default_model_path") or ""
+    ).strip() or None
     defaults["trust_remote_code"] = bool(server_cfg.get("trust_remote_code", True))
     return defaults
 
@@ -300,7 +334,9 @@ def _normalize_moe_batch_spec(spec: Optional[str]) -> tuple[str, Optional[List[i
         if not part:
             continue
         if not part.isdigit():
-            raise typer.BadParameter(f"Invalid batch size '{part}'. Use integers or 'all'.")
+            raise typer.BadParameter(
+                f"Invalid batch size '{part}'. Use integers or 'all'."
+            )
         value = int(part)
         if value <= 0:
             raise typer.BadParameter("Batch sizes must be positive integers.")
@@ -321,6 +357,7 @@ def _merge_moe_configs(target: Path, new_entries: Dict[str, Any]) -> Dict[str, A
     merged = _load_json(target)
     for key, value in new_entries.items():
         merged[str(key)] = value
+
     def _sort_key(key: str) -> Any:
         try:
             return int(key)
@@ -355,8 +392,8 @@ def _devuser_write_test(dir_path: Path, env: Optional[Dict[str, str]] = None) ->
     except Exception:
         pass
     snippet = (
-        f"set -e; d={json.dumps(d)}; mkdir -p \"$d\"; "
-        f"t=\"$d/.sgl_write_test_$$\"; echo ok > \"$t\"; rm -f \"$t\""
+        f'set -e; d={json.dumps(d)}; mkdir -p "$d"; '
+        f't="$d/.sgl_write_test_$$"; echo ok > "$t"; rm -f "$t"'
     )
     try:
         run_cmd = (
@@ -391,12 +428,16 @@ def _maybe_fix_perms(dir_path: Path, env: Optional[Dict[str, str]] = None) -> bo
     return _devuser_write_test(dir_path, env)
 
 
-def _permissions_preflight(stage: str, code: int, paths: list[Path], env: Dict[str, str]) -> Optional[StageResult]:
+def _permissions_preflight(
+    stage: str, code: int, paths: list[Path], env: Dict[str, str]
+) -> Optional[StageResult]:
     """Preflight temporarily disabled: unified devuser writes + symlinked JIT path avoid drift."""
     return None
 
 
-def _verify_moe_consumption_in_log(log_file: Optional[Path], stages: Dict[str, StageResult]) -> None:
+def _verify_moe_consumption_in_log(
+    log_file: Optional[Path], stages: Dict[str, StageResult]
+) -> None:
     """Set verified_in_log true for moe_tune if warm-ups succeeded and log contains the config consumption line."""
     if not log_file or not isinstance(log_file, Path) or not log_file.exists():
         return
@@ -422,12 +463,19 @@ def _verify_moe_consumption_in_log(log_file: Optional[Path], stages: Dict[str, S
     moe.artifacts = moe.artifacts or {}
     moe.artifacts["verified_in_log"] = True
     moe.artifacts["consuming_config_basename"] = consuming_base
-    moe.artifacts.setdefault("verify_log", {"container_path": str(log_file), "host_path": None})
+    moe.artifacts.setdefault(
+        "verify_log", {"container_path": str(log_file), "host_path": None}
+    )
 
 
 def _dir_stats(p: Path) -> Dict[str, Any]:
     if not p.exists():
-        return {"exists": False, "size_bytes": 0, "file_count": 0, "latest_mtime_iso": None}
+        return {
+            "exists": False,
+            "size_bytes": 0,
+            "file_count": 0,
+            "latest_mtime_iso": None,
+        }
     size = 0
     count = 0
     latest = 0.0
@@ -442,8 +490,17 @@ def _dir_stats(p: Path) -> Dict[str, Any]:
             count += 1
             if st.st_mtime > latest:
                 latest = st.st_mtime
-    iso = None if latest == 0 else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest))
-    return {"exists": True, "size_bytes": size, "file_count": count, "latest_mtime_iso": iso}
+    iso = (
+        None
+        if latest == 0
+        else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest))
+    )
+    return {
+        "exists": True,
+        "size_bytes": size,
+        "file_count": count,
+        "latest_mtime_iso": iso,
+    }
 
 
 def _flashinfer_signature(
@@ -505,20 +562,41 @@ def caches_inspect():
     print(json.dumps(snapshot, indent=2))
 
 
-
-def _run_subprocess(cmd: str, log_file: Optional[Path], heartbeat_name: str, env: Optional[Dict[str, str]] = None) -> int:
+def _run_subprocess(
+    cmd: str,
+    log_file: Optional[Path],
+    heartbeat_name: str,
+    env: Optional[Dict[str, str]] = None,
+) -> int:
     start = time.time()
     # Prefer to run as devuser to avoid root-owned artefacts on host mounts
     run_cmd = f"bash -lc {json.dumps(cmd)}"
-    proc = subprocess.Popen(["bash", "-lc", run_cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+    proc = subprocess.Popen(
+        ["bash", "-lc", run_cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
     hb_last = start
-    with (log_file.open("a", encoding="utf-8") if log_file else open(os.devnull, "w")) as lf:
+    with (
+        log_file.open("a", encoding="utf-8") if log_file else open(os.devnull, "w")
+    ) as lf:
         for line in proc.stdout:  # type: ignore[attr-defined]
             lf.write(line)
             now = time.time()
             if now - hb_last >= 60:
                 hb_last = now
-                print(json.dumps({"name": heartbeat_name, "phase": "progress", "elapsed_s": int(now - start)}))
+                print(
+                    json.dumps(
+                        {
+                            "name": heartbeat_name,
+                            "phase": "progress",
+                            "elapsed_s": int(now - start),
+                        }
+                    )
+                )
     return proc.wait()
 
 
@@ -576,8 +654,10 @@ def _start_warmup_server(
         "--max-total-tokens",
         str(server_args["max_total_tokens"]),
         # memory-safe warm-up defaults for request concurrency
-        "--max-running-requests", "1",
-        "--max-queued-requests", "1",
+        "--max-running-requests",
+        "1",
+        "--max-queued-requests",
+        "1",
     ]
     if trust_remote_code:
         args.append("--trust-remote-code")
@@ -587,7 +667,9 @@ def _start_warmup_server(
         args.extend(["--enable-torch-compile", "--torch-compile-max-bs", "1"])
     stdout = log_file.open("a", encoding="utf-8") if log_file else subprocess.DEVNULL
     cmd = " ".join(map(lambda s: json.dumps(s), args))
-    proc = subprocess.Popen(["bash","-lc", cmd], stdout=stdout, stderr=subprocess.STDOUT, env=env)
+    proc = subprocess.Popen(
+        ["bash", "-lc", cmd], stdout=stdout, stderr=subprocess.STDOUT, env=env
+    )
     return proc
 
 
@@ -640,9 +722,10 @@ def _stop_server(proc: subprocess.Popen, timeout_s: int = 10) -> Dict[str, Any]:
 def _prom_probe(run_id: str) -> Dict[str, Any]:
     # Best-effort: query local Prometheus for recent token increases under this run label
     import requests
+
     probe = {
         "prometheus_query": "increase(sglang:prompt_tokens_total[5s])",
-        "with_run_filter": f"increase(sglang:prompt_tokens_total{{container_run=\"{run_id}\"}}[5s])",
+        "with_run_filter": f'increase(sglang:prompt_tokens_total{{container_run="{run_id}"}}[5s])',
         "sample_count": 0,
         "ok": False,
     }
@@ -686,7 +769,15 @@ def _acquire_lock(slug: str, timeout: int = 600) -> bool:
         if held_for > timeout:
             try:
                 lock.unlink(missing_ok=True)
-                print(json.dumps({"phase": "lock_reclaimed", "slug": slug, "held_for_s": held_for}))
+                print(
+                    json.dumps(
+                        {
+                            "phase": "lock_reclaimed",
+                            "slug": slug,
+                            "held_for_s": held_for,
+                        }
+                    )
+                )
                 break
             except Exception:
                 pass
@@ -730,10 +821,14 @@ def _clear_in_progress(mark: Path) -> None:
 @caches_app.command("ensure")
 def caches_ensure(
     model: Optional[str] = typer.Option(None, "--model", help="Model ID/path"),
-    tp: int = typer.Option(1, "--tp", help="Tensor parallel size (default 1 on single GH200)"),
+    tp: int = typer.Option(
+        1, "--tp", help="Tensor parallel size (default 1 on single GH200)"
+    ),
     deep_gemm: str = typer.Option("ensure", "--deep-gemm", help="ensure|rebuild|skip"),
     moe: str = typer.Option("ensure", "--moe", help="ensure|rebuild|skip"),
-    flashinfer: str = typer.Option("ensure", "--flashinfer", help="ensure|rebuild|skip"),
+    flashinfer: str = typer.Option(
+        "ensure", "--flashinfer", help="ensure|rebuild|skip"
+    ),
     inductor: str = typer.Option("ensure", "--inductor", help="ensure|rebuild|skip"),
     moe_batch_sizes: Optional[str] = typer.Option(
         None,
@@ -745,14 +840,22 @@ def caches_ensure(
         "--moe-dtype",
         help="Optional dtype override passed to the Triton tuner (e.g. fp8_w8a8).",
     ),
-    json_out: bool = typer.Option(True, "--json/--no-json", help="Deprecated; inspect always prints JSON. Ignored here."),
+    json_out: bool = typer.Option(
+        True,
+        "--json/--no-json",
+        help="Deprecated; inspect always prints JSON. Ignored here.",
+    ),
 ):
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     manifest_path, manifest_host_path = _load_manifest_paths()
     data = json.loads(manifest_path.read_text())
     run_id = data.get("container_run_id")
     run_dir = manifest_path.parent
-    log_file = Path(data.get("storage", {}).get("log_file", "")) if data.get("storage") else None
+    log_file = (
+        Path(data.get("storage", {}).get("log_file", ""))
+        if data.get("storage")
+        else None
+    )
 
     # Write prep_result.json under a run-scoped directory for stability
     try:
@@ -768,7 +871,10 @@ def caches_ensure(
     git_commit = data.get("git_revision", "unknown")
     if git_commit == "unknown":
         try:
-            out = subprocess.check_output(["bash","-lc","git -C /workspaces/sglang rev-parse HEAD"], stderr=subprocess.DEVNULL)
+            out = subprocess.check_output(
+                ["bash", "-lc", "git -C /workspaces/sglang rev-parse HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
             git_commit = out.decode().strip() or "unknown"
         except Exception:
             pass
@@ -808,7 +914,7 @@ def caches_ensure(
         "trust_remote_code": server_defaults.get("trust_remote_code", True),
     }
     run_obj: Dict[str, Any] = {
-        "schema_version": "1",
+        "schema_version": 1,
         "status": "partial",
         "run": {
             "run_id": run_id,
@@ -848,7 +954,7 @@ def caches_ensure(
         "stages": {},
         "telemetry_probe": {
             "prometheus_query": "increase(sglang:prompt_tokens_total[5s])",
-            "with_run_filter": f"increase(sglang:prompt_tokens_total{{container_run=\"{run_id}\"}}[5s])",
+            "with_run_filter": f'increase(sglang:prompt_tokens_total{{container_run="{run_id}"}}[5s])',
             "sample_count": 0,
             "ok": False,
         },
@@ -856,8 +962,12 @@ def caches_ensure(
         "warnings": [],
     }
 
-    flashinfer_timeout = int(caching_config.get("flashinfer", {}).get("warmup_timeout_s", 300))
-    inductor_timeout = int(caching_config.get("inductor", {}).get("warmup_timeout_s", 300))
+    flashinfer_timeout = int(
+        caching_config.get("flashinfer", {}).get("warmup_timeout_s", 300)
+    )
+    inductor_timeout = int(
+        caching_config.get("inductor", {}).get("warmup_timeout_s", 300)
+    )
     moe_lock_timeout = int(caching_config.get("moe", {}).get("lock_timeout_s", 600))
 
     # MOE batch sizes: CLI flag overrides config
@@ -870,7 +980,9 @@ def caches_ensure(
         batch_spec = ",".join(str(b) for b in batch_list) if batch_list else None
 
     batch_mode, batch_values = _normalize_moe_batch_spec(batch_spec)
-    resolved_moe_dtype = _resolve_moe_dtype(moe_dtype, default=server_defaults["moe_dtype"])
+    resolved_moe_dtype = _resolve_moe_dtype(
+        moe_dtype, default=server_defaults["moe_dtype"]
+    )
 
     if batch_mode == "list" and batch_values:
         recorded_spec = ",".join(str(v) for v in batch_values)
@@ -895,7 +1007,7 @@ def caches_ensure(
     # DeepGEMM
     if deep_gemm != "skip":
         # Fail-fast permissions and disk preflight
-        dg_dir = Path(env["SGLANG_DG_CACHE_DIR"]) 
+        dg_dir = Path(env["SGLANG_DG_CACHE_DIR"])
         try:
             dg_dir.mkdir(parents=True, exist_ok=True)
             testf = dg_dir / ".write_test"
@@ -903,7 +1015,15 @@ def caches_ensure(
                 f.write("ok")
             testf.unlink(missing_ok=True)  # type: ignore[arg-type]
         except Exception:
-            stages["deep_gemm"] = StageResult(True, "error", 10, 0.0, {}, "permissions_unexpected", errors=[f"not writable: {dg_dir}"])
+            stages["deep_gemm"] = StageResult(
+                True,
+                "error",
+                10,
+                0.0,
+                {},
+                "permissions_unexpected",
+                errors=[f"not writable: {dg_dir}"],
+            )
         else:
             # Signature/noop check
             sig = {
@@ -929,14 +1049,27 @@ def caches_ensure(
                 except Exception:
                     prior = None
                 if prior == sig:
-                    stages["deep_gemm"] = StageResult(False, "noop", 0, 0.0, {"signature": sig})
+                    stages["deep_gemm"] = StageResult(
+                        False, "noop", 0, 0.0, {"signature": sig}
+                    )
             if "deep_gemm" not in stages:
                 # Proceed to compile
                 dg_def = caching_config["deep_gemm"]  # Fail-fast if key missing
                 # Allow env override, otherwise use config value (no fallback)
-                lock_to = int(os.environ.get("SGL_LOCK_TIMEOUT_DEEPGEMM") or dg_def["lock_timeout_s"])
+                lock_to = int(
+                    os.environ.get("SGL_LOCK_TIMEOUT_DEEPGEMM")
+                    or dg_def["lock_timeout_s"]
+                )
                 if not _acquire_lock("deep_gemm", timeout=lock_to):
-                    stages["deep_gemm"] = StageResult(True, "error", 10, 0.0, {}, "lock_timeout", errors=["lock held too long"])  # noqa: E501
+                    stages["deep_gemm"] = StageResult(
+                        True,
+                        "error",
+                        10,
+                        0.0,
+                        {},
+                        "lock_timeout",
+                        errors=["lock held too long"],
+                    )  # noqa: E501
                 else:
                     mark = _mark_in_progress("deep_gemm", started_at)
                     try:
@@ -946,10 +1079,14 @@ def caches_ensure(
                     compile_log = sig_dir / "compile.log"
                     # Disable metrics/tracing for compile to avoid collisions
                     env2 = env.copy()
-                    memf = str(dg_def["mem_fraction_static"])  # Fail-fast if key missing
+                    memf = str(
+                        dg_def["mem_fraction_static"]
+                    )  # Fail-fast if key missing
                     env2["SGL_COMPILE_MEM_FRACTION"] = memf
                     env2["SGLANG_COMPILE_MEM_FRACTION"] = memf
-                    compile_to = int(dg_def["compile_timeout_s"])  # Fail-fast if key missing
+                    compile_to = int(
+                        dg_def["compile_timeout_s"]
+                    )  # Fail-fast if key missing
                     compile_cmd_parts = [
                         "python",
                         "-m",
@@ -992,29 +1129,53 @@ def caches_ensure(
                         # Validate compile.log contains expected config
                         warnings = []
                         try:
-                            log_text = compile_log.read_text(encoding="utf-8", errors="ignore")
+                            log_text = compile_log.read_text(
+                                encoding="utf-8", errors="ignore"
+                            )
                             # Check for expected kv_cache_dtype (use configured value from signature)
                             expected_dtype = sig["kv_cache_dtype"]
                             if expected_dtype.lower() not in log_text.lower():
-                                warnings.append(f"compile.log does not contain '{expected_dtype}' - kv_cache_dtype may not have been applied")
+                                warnings.append(
+                                    f"compile.log does not contain '{expected_dtype}' - kv_cache_dtype may not have been applied"
+                                )
                             # Check for mem_fraction errors
-                            if "not enough memory" in log_text.lower() and "mem-fraction-static" in log_text.lower():
-                                warnings.append("compile.log contains memory errors - mem_fraction_static may be incorrect")
+                            if (
+                                "not enough memory" in log_text.lower()
+                                and "mem-fraction-static" in log_text.lower()
+                            ):
+                                warnings.append(
+                                    "compile.log contains memory errors - mem_fraction_static may be incorrect"
+                                )
                         except Exception as e:
                             warnings.append(f"Failed to validate compile.log: {e}")
 
                         artifacts = {
-                            "cache_dir": {"container_path": env["SGLANG_DG_CACHE_DIR"], "host_path": None},
-                            "compile_log": {"container_path": str(compile_log), "host_path": None},
+                            "cache_dir": {
+                                "container_path": env["SGLANG_DG_CACHE_DIR"],
+                                "host_path": None,
+                            },
+                            "compile_log": {
+                                "container_path": str(compile_log),
+                                "host_path": None,
+                            },
                             "signature": sig,
                         }
-                        stages["deep_gemm"] = StageResult(True, "ok", 0, dur, artifacts, warnings=warnings if warnings else None)
+                        stages["deep_gemm"] = StageResult(
+                            True,
+                            "ok",
+                            0,
+                            dur,
+                            artifacts,
+                            warnings=warnings if warnings else None,
+                        )
                         _clear_in_progress(mark)
                     else:
                         err_type = "nvrtc_compile_failed"
                         try:
                             tail = []
-                            with open(compile_log, "r", encoding="utf-8", errors="ignore") as f:
+                            with open(
+                                compile_log, "r", encoding="utf-8", errors="ignore"
+                            ) as f:
                                 lines = f.readlines()
                                 tail = [l.rstrip() for l in lines[-20:]]
                             if any("libcuda" in l.lower() for l in tail):
@@ -1024,10 +1185,21 @@ def caches_ensure(
                         except Exception:
                             tail = []
                         artifacts = {
-                            "compile_log": {"container_path": str(compile_log), "host_path": None},
+                            "compile_log": {
+                                "container_path": str(compile_log),
+                                "host_path": None,
+                            },
                             "compile_log_tail": tail,
                         }
-                        stages["deep_gemm"] = StageResult(True, "error", 10, dur, artifacts, err_type, errors=["compile_deep_gemm failed"])  # noqa: E501
+                        stages["deep_gemm"] = StageResult(
+                            True,
+                            "error",
+                            10,
+                            dur,
+                            artifacts,
+                            err_type,
+                            errors=["compile_deep_gemm failed"],
+                        )  # noqa: E501
                     _release_lock("deep_gemm")
     else:
         stages["deep_gemm"] = StageResult(False, "skipped", 10, 0.0, {})
@@ -1047,7 +1219,9 @@ def caches_ensure(
                 triton_u = info["triton_version"].replace(".", "_")
                 out_dir = Path(f"/profiles/moe_configs/configs/triton_{triton_u}")
                 out_dir.mkdir(parents=True, exist_ok=True)
-                dtype_arg = f" --dtype {resolved_moe_dtype}" if resolved_moe_dtype else ""
+                dtype_arg = (
+                    f" --dtype {resolved_moe_dtype}" if resolved_moe_dtype else ""
+                )
                 batch_targets: List[Optional[int]]
                 if batch_mode == "list" and batch_values:
                     batch_targets = [int(v) for v in batch_values]
@@ -1055,7 +1229,15 @@ def caches_ensure(
                     batch_targets = [None]
 
                 if not _acquire_lock("moe_tune", timeout=moe_lock_timeout):
-                    stages["moe_tune"] = StageResult(True, "error", 11, 0.0, {}, "lock_timeout", errors=["moe tuner lock held too long"])
+                    stages["moe_tune"] = StageResult(
+                        True,
+                        "error",
+                        11,
+                        0.0,
+                        {},
+                        "lock_timeout",
+                        errors=["moe tuner lock held too long"],
+                    )
                 else:
                     mark = _mark_in_progress("moe_tune", started_at)
                     total_dur = 0.0
@@ -1064,13 +1246,25 @@ def caches_ensure(
                     artifacts: Dict[str, Any] = {}
                     error_result: Optional[StageResult] = None
                     aggregated_entries: Dict[str, Any] = {}
-                    pattern = "*.json" if not resolved_moe_dtype else f"*dtype={resolved_moe_dtype}*.json"
-                    existing_configs = sorted(out_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+                    pattern = (
+                        "*.json"
+                        if not resolved_moe_dtype
+                        else f"*dtype={resolved_moe_dtype}*.json"
+                    )
+                    existing_configs = sorted(
+                        out_dir.glob(pattern),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
                     if existing_configs:
                         try:
                             aggregated_entries = _load_json(existing_configs[0])
                         except Exception as exc:
-                            logger.warning("Failed to load existing MoE config %s: %s", existing_configs[0], exc)
+                            logger.warning(
+                                "Failed to load existing MoE config %s: %s",
+                                existing_configs[0],
+                                exc,
+                            )
 
                     for batch in batch_targets:
                         batch_arg = "" if batch is None else f" --batch-size {batch}"
@@ -1086,18 +1280,46 @@ def caches_ensure(
                         run_dur = time.time() - t
                         total_dur += run_dur
                         if rc != 0:
-                            error_result = StageResult(True, "error", 11, total_dur, {}, "tuner_execution_error", errors=["moe tuner failed"])  # noqa: E501
+                            error_result = StageResult(
+                                True,
+                                "error",
+                                11,
+                                total_dur,
+                                {},
+                                "tuner_execution_error",
+                                errors=["moe tuner failed"],
+                            )  # noqa: E501
                             break
 
-                        cfgs = sorted(out_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                        cfgs = sorted(
+                            out_dir.glob("*.json"),
+                            key=lambda p: p.stat().st_mtime,
+                            reverse=True,
+                        )
                         if not cfgs:
-                            error_result = StageResult(True, "error", 11, total_dur, {}, "config_missing", errors=["moe tuner produced no configs"])  # noqa: E501
+                            error_result = StageResult(
+                                True,
+                                "error",
+                                11,
+                                total_dur,
+                                {},
+                                "config_missing",
+                                errors=["moe tuner produced no configs"],
+                            )  # noqa: E501
                             break
                         cfg = cfgs[0]
                         try:
                             new_entries = _load_json(cfg)
                         except Exception as exc:
-                            error_result = StageResult(True, "error", 11, total_dur, {}, "config_parse_error", errors=[f"{exc}"])
+                            error_result = StageResult(
+                                True,
+                                "error",
+                                11,
+                                total_dur,
+                                {},
+                                "config_parse_error",
+                                errors=[f"{exc}"],
+                            )
                             break
                         for key, value in new_entries.items():
                             aggregated_entries[str(key)] = value
@@ -1106,11 +1328,16 @@ def caches_ensure(
 
                         aggregated_entries = merged
                         artifacts = {
-                            "config_file": {"container_path": str(cfg), "host_path": None},
+                            "config_file": {
+                                "container_path": str(cfg),
+                                "host_path": None,
+                            },
                             "config_hash": None,
                             "triton_version": info["triton_version"],
                             "verified_in_log": False,
-                            "available_batch_sizes": sorted(int(k) for k in merged.keys()),
+                            "available_batch_sizes": sorted(
+                                int(k) for k in merged.keys()
+                            ),
                             "new_batch_sizes": sorted(set(completed_batches)),
                             "skipped_batch_sizes": sorted(set(skipped_batches)),
                             "dtype": resolved_moe_dtype,
@@ -1119,21 +1346,35 @@ def caches_ensure(
                         stages["moe_tune"] = error_result
                     else:
                         if completed_batches:
-                            stages["moe_tune"] = StageResult(True, "ok", 0, total_dur, artifacts)
+                            stages["moe_tune"] = StageResult(
+                                True, "ok", 0, total_dur, artifacts
+                            )
                         else:
                             if not artifacts:
                                 artifacts = {
-                                    "available_batch_sizes": sorted(int(k) for k in aggregated_entries.keys()),
+                                    "available_batch_sizes": sorted(
+                                        int(k) for k in aggregated_entries.keys()
+                                    ),
                                     "new_batch_sizes": [],
                                     "skipped_batch_sizes": sorted(set(skipped_batches)),
                                     "dtype": resolved_moe_dtype,
                                 }
-                            stages["moe_tune"] = StageResult(False, "noop", 0, 0.0, artifacts)
+                            stages["moe_tune"] = StageResult(
+                                False, "noop", 0, 0.0, artifacts
+                            )
                     _clear_in_progress(mark)
                     _release_lock("moe_tune")
             except Exception:
                 # If explicitly requested and ray missing, return error instead of noop
-                stages["moe_tune"] = StageResult(True, "error", 11, 0.0, {}, "ray_missing", errors=["ray not available; cannot run tuner"])  # noqa: E501
+                stages["moe_tune"] = StageResult(
+                    True,
+                    "error",
+                    11,
+                    0.0,
+                    {},
+                    "ray_missing",
+                    errors=["ray not available; cannot run tuner"],
+                )  # noqa: E501
     else:
         stages["moe_tune"] = StageResult(False, "skipped", 11, 0.0, {})
 
@@ -1143,13 +1384,37 @@ def caches_ensure(
         # Pick warm-up port preferring Prom-scraped 30000
         port = _pick_warmup_port_require_30000()
         if port is None:
-            stages["flashinfer"] = StageResult(True, "error", 12, 0.0, {}, "port_busy", errors=["port 30000 is busy"])  # noqa: E501
-            stages["inductor"] = StageResult(True, "error", 13, 0.0, {}, "port_busy", errors=["port 30000 is busy"])  # noqa: E501
+            stages["flashinfer"] = StageResult(
+                True, "error", 12, 0.0, {}, "port_busy", errors=["port 30000 is busy"]
+            )  # noqa: E501
+            stages["inductor"] = StageResult(
+                True, "error", 13, 0.0, {}, "port_busy", errors=["port 30000 is busy"]
+            )  # noqa: E501
             # finalize early
             run_obj["status"] = "partial"
+            run_obj["errors"] = [
+                name for name, result in stages.items() if result.status == "error"
+            ]
+            for name, result in stages.items():
+                run_obj["stages"][name] = {
+                    "ran": result.ran,
+                    "status": result.status,
+                    "status_code": result.code,
+                    "duration_s": round(result.dur, 3) if result.dur else 0,
+                    "artifacts": result.artifacts,
+                    "error_type": result.error_type,
+                    "warnings": result.warnings or [],
+                    "errors": result.errors or [],
+                }
             _atomic_write_json(prep_path, run_obj)
             print(f"RESULT_JSON {prep_path}")
-            summary = " ".join([f"{k}:{stages[k].status}" for k in ("deep_gemm","moe_tune","flashinfer","inductor") if k in stages])
+            summary = " ".join(
+                [
+                    f"{k}:{stages[k].status}"
+                    for k in ("deep_gemm", "moe_tune", "flashinfer", "inductor")
+                    if k in stages
+                ]
+            )
             print(f"RESULT_STATUS partial {summary}")
             return
         run_obj["run"]["settings"]["warmup_port"] = port
@@ -1160,7 +1425,10 @@ def caches_ensure(
             pf = _permissions_preflight(
                 "flashinfer",
                 12,
-                [Path(env["FLASHINFER_WORKSPACE_DIR"]), Path(env["FLASHINFER_JIT_LOG_DIR"])],
+                [
+                    Path(env["FLASHINFER_WORKSPACE_DIR"]),
+                    Path(env["FLASHINFER_JIT_LOG_DIR"]),
+                ],
                 env,
             )
             if pf:
@@ -1177,21 +1445,32 @@ def caches_ensure(
 
                 warmup_needed = True
                 stats_before = _dir_stats(flashinfer_dir)
-                if flashinfer == "ensure" and flashinfer_sig_file.exists() and stats_before.get("file_count", 0) > 0:
+                if (
+                    flashinfer == "ensure"
+                    and flashinfer_sig_file.exists()
+                    and stats_before.get("file_count", 0) > 0
+                ):
                     try:
                         prior_sig = json.loads(flashinfer_sig_file.read_text())
                     except Exception:
                         prior_sig = None
                     if prior_sig == flashinfer_signature:
                         artifacts = {
-                            "workspace_dir": {"container_path": str(flashinfer_dir), "host_path": None},
+                            "workspace_dir": {
+                                "container_path": str(flashinfer_dir),
+                                "host_path": None,
+                            },
                             "files": {
                                 "count": stats_before.get("file_count", 0),
                                 "bytes": stats_before.get("size_bytes", 0),
-                                "latest_mtime_iso": stats_before.get("latest_mtime_iso"),
+                                "latest_mtime_iso": stats_before.get(
+                                    "latest_mtime_iso"
+                                ),
                             },
                         }
-                        stages["flashinfer"] = StageResult(False, "noop", 0, 0.0, artifacts)
+                        stages["flashinfer"] = StageResult(
+                            False, "noop", 0, 0.0, artifacts
+                        )
                         warmup_needed = False
 
                 if warmup_needed:
@@ -1207,7 +1486,9 @@ def caches_ensure(
                         log_file,
                         enable_compile=False,
                         env=env,
-                        trust_remote_code=server_defaults.get("trust_remote_code", True),
+                        trust_remote_code=server_defaults.get(
+                            "trust_remote_code", True
+                        ),
                     )
                     ok_ready = _wait_http_ready(port, timeout=flashinfer_timeout)
                     # Do not adjust mem_fraction on the fly; single attempt per policy
@@ -1217,7 +1498,10 @@ def caches_ensure(
                     if ok_ready and ok_req:
                         stats_after = _dir_stats(flashinfer_dir)
                         artifacts = {
-                            "workspace_dir": {"container_path": str(flashinfer_dir), "host_path": None},
+                            "workspace_dir": {
+                                "container_path": str(flashinfer_dir),
+                                "host_path": None,
+                            },
                             "files": {
                                 "count": stats_after.get("file_count", 0),
                                 "bytes": stats_after.get("size_bytes", 0),
@@ -1225,15 +1509,27 @@ def caches_ensure(
                             },
                             "cleanup": cleanup,
                         }
-                        stages["flashinfer"] = StageResult(True, "ok", 0, dur, artifacts)
+                        stages["flashinfer"] = StageResult(
+                            True, "ok", 0, dur, artifacts
+                        )
                         try:
-                            _atomic_write_json(flashinfer_sig_file, flashinfer_signature)
+                            _atomic_write_json(
+                                flashinfer_sig_file, flashinfer_signature
+                            )
                         except Exception:
                             pass
                         _clear_in_progress(mark)
                     else:
                         _clear_in_progress(mark)
-                        stages["flashinfer"] = StageResult(True, "error", 12, dur, {}, "oom_during_warmup" if not ok_ready else "request_failed", errors=["warm-up failed"])  # noqa: E501
+                        stages["flashinfer"] = StageResult(
+                            True,
+                            "error",
+                            12,
+                            dur,
+                            {},
+                            "oom_during_warmup" if not ok_ready else "request_failed",
+                            errors=["warm-up failed"],
+                        )  # noqa: E501
 
         else:
             stages["flashinfer"] = StageResult(False, "skipped", 12, 0.0, {})
@@ -1267,12 +1563,26 @@ def caches_ensure(
                 cleanup = _stop_server(proc)
                 dur = time.time() - t
                 if ok_ready and ok_req:
-                    artifacts = {"cache_dir": {"container_path": "/profiles/torchinductor", "host_path": None}, "cleanup": cleanup}
+                    artifacts = {
+                        "cache_dir": {
+                            "container_path": "/profiles/torchinductor",
+                            "host_path": None,
+                        },
+                        "cleanup": cleanup,
+                    }
                     stages["inductor"] = StageResult(True, "ok", 0, dur, artifacts)
                     _clear_in_progress(mark)
                 else:
                     _clear_in_progress(mark)
-                    stages["inductor"] = StageResult(True, "error", 13, dur, {}, "oom_during_warmup" if not ok_ready else "request_failed", errors=["warm-up failed"])  # noqa: E501
+                    stages["inductor"] = StageResult(
+                        True,
+                        "error",
+                        13,
+                        dur,
+                        {},
+                        "oom_during_warmup" if not ok_ready else "request_failed",
+                        errors=["warm-up failed"],
+                    )  # noqa: E501
         else:
             stages["inductor"] = StageResult(False, "skipped", 13, 0.0, {})
     else:
@@ -1292,7 +1602,7 @@ def caches_ensure(
             "errors": r.errors or [],
         }
         try:
-            stage_dir = (prep_path.parent / "stages")
+            stage_dir = prep_path.parent / "stages"
             stage_dir.mkdir(parents=True, exist_ok=True)
             _atomic_write_json(stage_dir / f"{name}.json", run_obj["stages"][name])
         except Exception:
@@ -1306,7 +1616,7 @@ def caches_ensure(
 
     # Aggregate from stage files present (fail-fast on critical errors)
     try:
-        stage_dir = (prep_path.parent / "stages")
+        stage_dir = prep_path.parent / "stages"
         stages_all = {}
         for p in stage_dir.glob("*.json"):
             try:
@@ -1344,18 +1654,27 @@ def caches_ensure(
     # Convenience: record prep_result path into manifest (container + host rebased when available)
     try:
         m = json.loads(manifest_path.read_text())
-        m.setdefault("paths", {}).setdefault("container", {})["prep_result"] = str(prep_path)
+        m.setdefault("paths", {}).setdefault("container", {})["prep_result"] = str(
+            prep_path
+        )
         if manifest_host_path:
             # mirror run-scoped layout under host path
             host_prep = manifest_host_path.parent / run_id / "prep_result.json"
-            m.setdefault("paths", {}).setdefault("host", {})["prep_result"] = str(host_prep)
+            m.setdefault("paths", {}).setdefault("host", {})["prep_result"] = str(
+                host_prep
+            )
         _atomic_write_json(manifest_path, m)
     except Exception as e:
         # Non-critical: prep_result was written, just couldn't update manifest
         logger.warning(f"Failed to update manifest with prep_result path: {e}")
     # human-friendly result lines
     print(f"RESULT_JSON {prep_path}")
-    summary = " ".join([f"{k}:{stages[k].status}" for k in ("deep_gemm","moe_tune","flashinfer","inductor")])
+    summary = " ".join(
+        [
+            f"{k}:{stages[k].status}"
+            for k in ("deep_gemm", "moe_tune", "flashinfer", "inductor")
+        ]
+    )
     print(f"RESULT_STATUS {status} {summary}")
 
 

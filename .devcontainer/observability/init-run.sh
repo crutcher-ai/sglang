@@ -75,6 +75,24 @@ if [ -n "${host_manifest_root}" ]; then
   host_manifest_path="${host_manifest_root}/${container_run_id}.json"
 fi
 
+host_telemetry_root="${HOST_TELEMETRY_ROOT:-}"
+host_profiles_root="${HOST_PROFILES_ROOT:-}"
+if [ -z "${host_telemetry_root}" ] || [ -z "${host_profiles_root}" ]; then
+  warn "HOST_TELEMETRY_ROOT or HOST_PROFILES_ROOT not set; host paths in manifest may be unusable"
+fi
+
+if [ -n "${host_telemetry_root}" ]; then
+  host_prometheus_path="${host_telemetry_root}/prometheus/${container_run_id}"
+  host_jaeger_path="${host_telemetry_root}/jaeger/${container_run_id}"
+  host_log_path="${host_telemetry_root}/logs/${container_run_id}.log"
+else
+  host_prometheus_path=""
+  host_jaeger_path=""
+  host_log_path=""
+fi
+
+host_profiles_path="${host_profiles_root}"
+
 {
   echo "CONTAINER_RUN_META_JSON=${manifest_json}"
   if [ -n "${host_manifest_path}" ]; then
@@ -182,6 +200,22 @@ cat <<EOF | as_devuser tee "${manifest_json}" >/dev/null
     "jaeger": {"ui": 16686, "otlp_grpc": 4317, "otlp_http": 4318},
     "node_exporter": {"port": 9100},
     "dcgm_exporter": {"port": 9400}
+  },
+  "paths": {
+    "container": {
+      "telemetry_root": "/telemetry",
+      "prometheus_dir": "${prom_storage_dir}",
+      "jaeger_dir": "${jaeger_run_root}",
+      "log_file": "${log_file}",
+      "profiles_root": "/profiles"
+    },
+    "host": {
+      "telemetry_root": "${host_telemetry_root}",
+      "prometheus_dir": "${host_prometheus_path}",
+      "jaeger_dir": "${host_jaeger_path}",
+      "log_file": "${host_log_path}",
+      "profiles_root": "${host_profiles_path}"
+    }
   },
   "telemetry_surfaces": {
     "sglang_metrics": {
