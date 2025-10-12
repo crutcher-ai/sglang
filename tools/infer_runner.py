@@ -139,7 +139,8 @@ def run_scenario(args: argparse.Namespace) -> int:
                 r, c = (None, raw)
                 if thinking_hint == "qwen-thinking":
                     r, c = _think_split_qwen(raw)
-                # content‑only continuation
+                # Record full round in history: user then assistant (content-only)
+                history.append({"role": "user", "content": prompt})
                 history.append({"role": "assistant", "content": c})
                 usage = getattr(resp, "usage", None)
                 usage_obj = None
@@ -181,4 +182,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

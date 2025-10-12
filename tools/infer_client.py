@@ -128,8 +128,13 @@ def _one_shot(args: argparse.Namespace) -> int:
         raw = ""
     reasoning, content = (None, raw)
     if args.thinking_hint == "qwen-thinking":
-        r, c = _think_split_qwen(raw)
-        reasoning, content = r, c
+        # Prefer server-provided split if present
+        rc = getattr(choice.message, "reasoning_content", None)
+        if isinstance(rc, str) and rc.strip():
+            reasoning, content = rc, (raw or "")
+        else:
+            r, c = _think_split_qwen(raw)
+            reasoning, content = r, c
 
     usage = getattr(resp, "usage", None)
     usage_obj = None
@@ -137,6 +142,7 @@ def _one_shot(args: argparse.Namespace) -> int:
         usage_obj = {
             "prompt_tokens": getattr(usage, "prompt_tokens", None),
             "completion_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
         }
 
     out = {
@@ -147,6 +153,8 @@ def _one_shot(args: argparse.Namespace) -> int:
         "usage": usage_obj,
         "timings": {"start_ts": started, "end_ts": finished, "total_latency_ms": total_ms},
         "request_snapshot": {
+            "base_url": base_url,
+            "model_id": args.model_id,
             "system": args.system,
             "context": args.context,
             "prompt": args.prompt,
@@ -163,7 +171,8 @@ def _one_shot(args: argparse.Namespace) -> int:
     }
 
     # Write artifacts
-    run_dir = Path(manifest_host).parent / run_id / "inference" / test_id
+    # manifest_host already resides under .../container_runs/<RUN_ID>/
+    run_dir = Path(manifest_host).parent / "inference" / test_id
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / "transcript.json").open("w", encoding="utf-8") as f:
         json.dump({
@@ -209,4 +218,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

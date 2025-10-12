@@ -12,14 +12,14 @@ status() {
   if command -v curl >/dev/null 2>&1; then
     if curl -fsS --max-time 1 "$URL" >/dev/null; then
       echo ready; return 0
-    else
-      if curl -fsS --max-time 1 -o /dev/null -w '%{http_code}' "$URL" 2>/dev/null | grep -q '^[0-9][0-9][0-9]$'; then
-        echo starting; return 0
-      fi
+    fi
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 "$URL" || echo "")"
+    if printf '%s' "$code" | grep -Eq '^[1-5][0-9]{2}$'; then
+      echo starting; return 0
     fi
   else
     # Fallback to bash+timeout+cat /dev/tcp (best effort)
-    if (exec 3<>/dev/tcp/127.0.0.1/${PORT}) 2>/dev/null; then
+    if (exec 3<>/dev/tcp/${HOST}/${PORT}) 2>/dev/null; then
       echo starting; return 0
     fi
   fi
@@ -27,4 +27,3 @@ status() {
 }
 
 status
-

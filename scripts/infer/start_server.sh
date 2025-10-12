@@ -5,6 +5,7 @@ set -euo pipefail
 # Emits a small JSON with run_id, health, port, manifest_host_path, log_file, started_at_iso.
 
 CONTAINER_NAME="${CONTAINER_NAME:-sglang-dev}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST_OBS_ROOT="${HOST_OBS_ROOT:-$HOME/sglang-observability}"
 RUN_META_FILE="${HOST_OBS_ROOT}/telemetry/container_run_meta.env"
 HOST_PORT="${PORT:-30000}"
@@ -47,7 +48,7 @@ PY
 [ -n "$LOG_FILE" ] || die "log file missing in manifest"
 
 # If healthy already, print status and exit
-if scripts/infer/status.sh | grep -qx ready; then
+if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
   cat <<EOF
 {
   "run_id": "$RUN_ID",
@@ -117,7 +118,7 @@ docker exec -u devuser "$CONTAINER_NAME" bash -lc "\
 # Poll readiness (45s max)
 deadline=$((SECONDS+45))
 while [ $SECONDS -lt $deadline ]; do
-  if scripts/infer/status.sh | grep -qx ready; then
+  if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
     cat <<EOF
 {
   "run_id": "$RUN_ID",
@@ -134,4 +135,3 @@ EOF
 done
 
 die "server did not become ready on port $HOST_PORT"
-
