@@ -200,6 +200,57 @@ Cache helpers (host)
 - Verify MoE consumption within a log window:
   - `grep -n "Using MoE kernel config from" "$LOG_FILE"` (bound by `container_log_anchor.window`)
 
+### Provider‑prep caches and flags (semantics)
+
+This repo ships a small host wrapper for provider prep: `scripts/cache/populate_caches.sh`. It forwards a constrained set of flags to the in‑container admin CLI (`.devcontainer/tools/sgl_admin.py caches ensure ...`). The wrapper only accepts:
+
+- `--model`, `--tp`
+- `--flashinfer {ensure|rebuild|skip}`
+- `--inductor {ensure|rebuild|skip}`
+- `--deep-gemm {ensure|rebuild|skip}`
+- `--moe {ensure|rebuild|skip}`
+
+Any other option (for example `--moe-dtype`, `--moe-batch-sizes`) will be rejected by the wrapper with “Unknown arg”. If you need additional tuning knobs, extend the wrapper and forward them explicitly.
+
+Cache locations (persist across runs on host)
+- FlashInfer workspace: `$HOME/sglang-observability/profiles/flashinfer`
+- TorchInductor (PyTorch compile): `$HOME/sglang-observability/profiles/torchinductor`
+- DeepGEMM kernels: `$HOME/sglang-observability/profiles/deep_gemm/<model_slug>`
+- MoE fusion configs: `$HOME/sglang-observability/profiles/moe_configs/configs/...`
+
+Stage semantics
+- FlashInfer
+  - `ensure`: compare a signature under `/profiles/flashinfer`; if it matches, no‑op; otherwise start a short‑lived server (no torch.compile) to prime the workspace, then write a new signature.
+  - `rebuild`: always warm up (ignore signature).
+  - `skip`: do nothing; the main server may JIT as needed on first request.
+- Inductor (TorchInductor / `torch.compile`)
+  - `ensure`: start a short‑lived server with `--enable-torch-compile` to prime `/profiles/torchinductor`. There is no signature/no‑op check today; this does real work every time you request it.
+  - `rebuild`: same as `ensure` currently.
+  - `skip`: do nothing; if the main server is later run with `torch.compile`, it can reuse any existing cache under `/profiles/torchinductor`.
+- DeepGEMM
+  - `ensure`: signature under `/profiles/deep_gemm/<model_slug>`; no‑op if it matches; otherwise (re)compile and record signature.
+  - `rebuild`: force compile regardless of signature.
+  - `skip`: do nothing.
+- MoE tuner (fusion configs)
+  - `ensure`: ensure requested configs exist under `/profiles/moe_configs/configs/...`; no‑op if already present; otherwise run the tuner (requires Ray).
+  - `rebuild`: retune; `skip`: do nothing. If Ray is missing and tuning is requested, the stage’s `error_type` will be `ray_missing`.
+
+Important behaviors
+- Defaults when you provide no stage flags: the underlying admin CLI defaults to `ensure` for all stages. That is often heavier than desired—pass explicit stage flags for predictable behavior.
+- Port discipline: FlashInfer and Inductor warm‑ups require port 30000 to be free. If the main server is already running, these stages fail with `error_type: port_busy`. Always run provider‑prep before starting the server.
+- Persistence: All of the above caches live under `$HOME/sglang-observability/profiles/...` on the host and survive server/container restarts. Using `skip` does not disable cache usage by the server; it merely means prep does nothing upfront.
+
+Suggested flags for a typical smoke (reuse caches only)
+```
+scripts/cache/populate_caches.sh \
+  --model /models/Qwen/Qwen3-Next-80B-A3B-Thinking-FP8 \
+  --tp 1 \
+  --flashinfer ensure \
+  --inductor ensure \
+  --moe skip \
+  --deep-gemm skip
+```
+
 Prometheus & logs
 - PromQL (one‑shot window): `increase(sglang:prompt_tokens_total{container_run="RUN_ID"}[WINDOW])`
 - Log slice by window: `awk -v s=START -v e=END '$0 >= s && $0 <= e' "$LOG_FILE" > /tmp/slice.log`
