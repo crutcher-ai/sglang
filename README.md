@@ -113,6 +113,103 @@ Networking & paths
   pointer file at `telemetry/container_run_meta.env` always indicates the active
   run’s manifest and log file.
 
+### Benchmark Agent Cheatsheet (Commands)
+
+Container lifecycle
+- Start container (host):
+  - `./scripts/start_observable_container.sh`
+  - Output includes the pointer lines:
+    - `CONTAINER_RUN_META_JSON_HOST=/abs/.../container-run-<RUN_ID>.json`
+    - `CONTAINER_RUN_META_JSON=/telemetry/container_runs/container-run-<RUN_ID>.json`
+- Stop container (host):
+  - `./scripts/stop_observable_container.sh` (removes pointer and container)
+
+Pointers & manifests
+- Pointer: `$HOME/sglang-observability/telemetry/container_run_meta.env`
+- Manifest (host): `$(awk -F= '/CONTAINER_RUN_META_JSON_HOST=/{print $2}' "$HOME/sglang-observability/telemetry/container_run_meta.env")`
+  - Log file: `jq -r .storage.log_file "$MANIFEST"`
+  - Run ID: `jq -r .container_run_id "$MANIFEST"`
+- Prometheus:
+  - Config: `/telemetry/prometheus/prometheus.yml`
+  - TSDB: `/telemetry/prometheus/<RUN_ID>/`
+
+Server control (host)
+- Start server (prints JSON): `scripts/infer/start_server.sh`
+- Health (ready|starting|down): `scripts/infer/status.sh`
+- Stop server: `scripts/infer/stop_server.sh`
+
+One‑shot inference (host)
+- Thinking (Qwen) example:
+```
+python tools/infer_client.py one-shot \
+  --test-id os1 \
+  --base-url http://127.0.0.1:30000/v1 \
+  --api-key dummy \
+  --model-id local \
+  --system "You are helpful." \
+  --prompt "Explain why the sky is blue in two sentences." \
+  --temperature 0.6 --top-p 0.95 --max-tokens 1024 \
+  --thinking-hint qwen-thinking
+```
+- Instruct example (no reasoning split): add `--thinking-hint none` and e.g. `--temperature 0.7 --top-p 0.8`.
+- Artifacts (host):
+  - `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/inference/os1/transcript.json`
+  - `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/inference/os1/metrics.json`
+- Return JSON (stdout) includes:
+  - `usage` `{prompt_tokens, completion_tokens, total_tokens?}`
+  - `response_snapshot` `{assistant_text_raw, assistant_reasoning_text?, assistant_content_text}`
+  - `prom_bookmark` `{container_run_id, window}` and `container_log_anchor` `{path, window}`
+
+Scenario runner (host)
+```
+cat > /tmp/scenario.yaml <<'YAML'
+session:
+  base_url: http://127.0.0.1:30000/v1
+  model_id: local
+  system: "You are helpful."
+  defaults:
+    temperature: 0.6
+    top_p: 0.95
+    max_tokens: 512
+    qwen_enable_thinking: true
+
+one_shot:
+  - id: s1
+    prompt: "Give a short proof that the sum of two even numbers is even."
+    overrides: {max_tokens: 256}
+
+multi_turn:
+  - id: c1
+    context: "We are discussing even numbers."
+    turns:
+      - user: "Prove the sum of two even numbers is even."
+      - user: "Generalize to the sum of n even numbers."
+YAML
+
+python tools/infer_runner.py --scenario /tmp/scenario.yaml | tee /tmp/run.ndjson
+```
+- Per‑test override for thinking: add `overrides: { thinking_hint: none }` to a test to mix Instruct + Thinking in one file.
+
+Cache helpers (host)
+- Inspect caches: `scripts/cache/inspect_caches.sh`
+- Populate MoE only: `scripts/cache/populate_caches.sh --model /models/<your_model> --tp 1 --moe ensure --flashinfer skip --inductor skip --deep-gemm skip`
+- Verify MoE consumption within a log window:
+  - `grep -n "Using MoE kernel config from" "$LOG_FILE"` (bound by `container_log_anchor.window`)
+
+Prometheus & logs
+- PromQL (one‑shot window): `increase(sglang:prompt_tokens_total{container_run="RUN_ID"}[WINDOW])`
+- Log slice by window: `awk -v s=START -v e=END '$0 >= s && $0 <= e' "$LOG_FILE" > /tmp/slice.log`
+
+Common overrides
+- Health host/port: `HOST=0.0.0.0 PORT=30001 scripts/infer/status.sh`
+- Server context/tokens (at start): `CONTEXT_LENGTH=65536 MAX_TOTAL_TOKENS=65536 scripts/infer/start_server.sh`
+
+Cleanup & recovery
+- Clean stop & remove pointer: `./scripts/stop_observable_container.sh`
+- Fresh run: `./scripts/start_observable_container.sh && scripts/infer/start_server.sh`
+- Port still busy: `fuser 30000/tcp -k || lsof -iTCP:30000`
+
+
 ## Adoption and Sponsorship
 SGLang has been deployed at large scale, generating trillions of tokens in production each day. It is trusted and adopted by a wide range of leading enterprises and institutions, including xAI, AMD, NVIDIA, Intel, LinkedIn, Cursor, Oracle Cloud, Google Cloud, Microsoft Azure, AWS, Atlas Cloud, Voltage Park, Nebius, DataCrunch, Novita, InnoMatrix, MIT, UCLA, the University of Washington, Stanford, UC Berkeley, Tsinghua University, Jam & Tea Studios, Baseten, and other major technology organizations across North America and Asia. As an open-source LLM inference engine, SGLang has become the de facto industry standard, with deployments running on over 1,000,000 GPUs worldwide.
 
