@@ -70,6 +70,15 @@ print(((d.get('storage') or {}).get('log_file')) or '')
 PY)
 [ -n "$LOG_FILE" ] || die "log file missing in manifest"
 
+HOST_LOG_FILE=$(python3 - "$MANIFEST_HOST" <<'PY'
+import json,sys
+p=sys.argv[1]
+d=json.load(open(p))
+paths = d.get('paths') or {}
+host_paths = paths.get('host') if isinstance(paths.get('host'), dict) else {}
+print(host_paths.get('log_file', ''))
+PY)
+
 # If healthy already, print status and exit
 if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
   emit_ready_json "$(now_iso)"
@@ -150,6 +159,10 @@ fi
 
 docker exec -u devuser \
   "$CONTAINER_NAME" bash -lc "bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event sglang_trace_config run_id=\"$RUN_ID\" trace=$TRACE_STATE otlp=\"$OTLP\" otel_attrs=\"$OTEL_ATTRS\" || true" >/dev/null
+
+if [ -n "$HOST_LOG_FILE" ]; then
+  printf '[%s] tracing config: trace=%s otlp=%s otel_attrs="%s"\n' "$(now_iso)" "$TRACE_STATE" "$OTLP" "$OTEL_ATTRS" >> "$HOST_LOG_FILE" || true
+fi
 
 # Start server in the container (avoid Bash @Q quoting; pass env vars instead)
 # Persist caches into /profiles mounts for the main server as well
