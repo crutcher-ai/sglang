@@ -132,6 +132,25 @@ TRACE=$(val "$cfg_json" trace)
 OTLP=$(val "$cfg_json" otlp)
 MODEL_SLUG="$(basename "$MODEL")"
 
+if [ -z "$OTLP" ]; then
+  OTLP="127.0.0.1:4317"
+fi
+
+OTEL_ATTRS="container_run=$RUN_ID,service.instance.id=$RUN_ID"
+if [ -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]; then
+  OTEL_ATTRS="${OTEL_RESOURCE_ATTRIBUTES},${OTEL_ATTRS}"
+fi
+# NOTE: upstream uses OLTP_TRACES_ENDPOINT spelling; keep matching their env contract
+# even though local variable is OTLP (OpenTelemetry Protocol).
+
+TRACE_STATE="disabled"
+if [ -n "$TRACE" ]; then
+  TRACE_STATE="enabled"
+fi
+
+docker exec -u devuser \
+  "$CONTAINER_NAME" bash -lc "bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event sglang_trace_config run_id=\"$RUN_ID\" trace=$TRACE_STATE otlp=\"$OTLP\" otel_attrs=\"$OTEL_ATTRS\" || true" >/dev/null
+
 # Start server in the container (avoid Bash @Q quoting; pass env vars instead)
 # Persist caches into /profiles mounts for the main server as well
 # Fail fast: ensure DeepGEMM cache dir is writable inside the container
@@ -149,6 +168,8 @@ docker exec -u devuser \
   -e MAMBA="$MAMBA" \
   -e TRACE="$TRACE" \
   -e OTLP="$OTLP" \
+  -e OTEL_RESOURCE_ATTRIBUTES="$OTEL_ATTRS" \
+  -e SGL_CONTAINER_RUN_ID="$RUN_ID" \
   -e TRITON_CACHE_DIR="/profiles/triton" \
   -e TORCHINDUCTOR_CACHE_DIR="/profiles/torchinductor" \
   -e FLASHINFER_WORKSPACE_DIR="/profiles/flashinfer" \

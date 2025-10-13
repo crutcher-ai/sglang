@@ -184,10 +184,12 @@ def process_tracing_init(otlp_endpoint, server_name):
         return
 
     try:
-        resource = Resource.create(
-            attributes={
-                SERVICE_NAME: server_name,
-            }
+        resource = Resource.get_default().merge(
+            Resource.create(
+                attributes={
+                    SERVICE_NAME: server_name,
+                }
+            )
         )
         tracer_provider = TracerProvider(
             resource=resource, id_generator=SglangTraceCustomIdGenerator()
@@ -360,12 +362,16 @@ def trace_req_start(
         start_time=ts,
     )
 
+    container_run = os.getenv("SGL_CONTAINER_RUN_ID")
+
     root_span.set_attributes(
         {
             "rid": rid,
             "bootstrap_room": bootstrap_room if bootstrap_room else "None",
         }
     )
+    if container_run:
+        root_span.set_attribute("container_run", container_run)
 
     reqs_context[rid].root_span = root_span
     reqs_context[rid].root_span_context = trace.set_span_in_context(root_span)
