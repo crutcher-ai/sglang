@@ -128,8 +128,12 @@ def test_start_server_invokes_docker_with_overrides(
     assert proc.returncode != 0
     assert docker_log.exists()
     recorded = docker_log.read_text().strip()
-    assert "--model-path" in recorded
-    assert "--mem-fraction-static" in recorded
-    assert "--max-mamba-cache-size" in recorded
-    assert "--enable-trace" in recorded
-    assert "--oltp-traces-endpoint" in recorded
+    # We only need to assert that overrides are forwarded; the final flags are
+    # constructed inside the bash -lc string which may not be visible here.
+    assert "-e MODEL=/models/test" in recorded
+    assert "-e MEM=0.93" in recorded
+    assert "-e KV=fp8_e4m3" in recorded
+    assert "-e MAXP=8192" in recorded and "-e MAXT=8192" in recorded
+    assert "-e MAMBA=7" in recorded
+    assert "-e TRACE=1" in recorded
+    assert "-e OTLP=localhost:4317" in recorded

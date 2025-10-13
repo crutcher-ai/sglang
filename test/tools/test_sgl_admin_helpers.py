@@ -52,7 +52,7 @@ def _fresh_env(tmp_path: Path):
         "TRITON_CACHE_DIR": str(profiles / "triton"),
         "FLASHINFER_WORKSPACE_DIR": str(profiles / "flashinfer"),
         "TORCHINDUCTOR_CACHE_DIR": str(profiles / "torchinductor"),
-        "SGLANG_DG_CACHE_DIR": str(profiles / "deep_gemm"),
+        "SGL_DG_CACHE_DIR": str(profiles / "deep_gemm"),
         "SGLANG_MOE_CONFIG_DIR": str(profiles / "moe_configs"),
         "FLASHINFER_JIT_LOG_DIR": str(jit),
     }
@@ -73,7 +73,7 @@ def test_prepare_env_creates_directories_and_symlink(tmp_path, monkeypatch):
         "TRITON_CACHE_DIR",
         "FLASHINFER_WORKSPACE_DIR",
         "TORCHINDUCTOR_CACHE_DIR",
-        "SGLANG_DG_CACHE_DIR",
+        "SGL_DG_CACHE_DIR",
         "SGLANG_MOE_CONFIG_DIR",
     ):
         assert Path(prepared[key]).is_dir()
@@ -219,7 +219,7 @@ def test_caches_ensure_reports_port_busy(tmp_path, monkeypatch, capfd):
         "TRITON_CACHE_DIR": tmp_path / "cache" / "triton",
         "FLASHINFER_WORKSPACE_DIR": tmp_path / "cache" / "flashinfer",
         "TORCHINDUCTOR_CACHE_DIR": tmp_path / "cache" / "inductor",
-        "SGLANG_DG_CACHE_DIR": tmp_path / "cache" / "deep_gemm",
+        "SGL_DG_CACHE_DIR": tmp_path / "cache" / "deep_gemm",
         "SGLANG_MOE_CONFIG_DIR": tmp_path / "cache" / "moe_configs",
         "FLASHINFER_JIT_LOG_DIR": tmp_path / "cache" / "flashinfer" / "jit",
     }

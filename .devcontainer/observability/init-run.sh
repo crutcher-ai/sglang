@@ -67,6 +67,9 @@ meta_dir="$(dirname "${RUN_META_FILE}")"
 as_devuser install -d -m 770 "${meta_dir}"
 
 as_devuser mkdir -p "${RUN_MANIFEST_ROOT}"
+# Textfile collector directory for run-scoped events
+METRICS_DIR="${METRICS_DIR:-/telemetry/metrics}"
+as_devuser mkdir -p "${METRICS_DIR}"
 manifest_json="${RUN_MANIFEST_ROOT}/${container_run_id}.json"
 
 host_manifest_root="${HOST_MANIFEST_ROOT:-}"
@@ -111,6 +114,10 @@ exec > >(tee -a "${log_file}") 2>&1
 
 echo "Initialized container run: ${container_run_id}"
 
+# Emit container_started event (best-effort)
+bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event container_started run_id="${container_run_id}" || true
+trap 'bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event container_stopped run_id="'"${container_run_id}"'" || true' EXIT
+
 eval "${PROMETHEUS_EXTRA_ENV:-true}" >/dev/null 2>&1 || true
 
 ensure_dcgm_capability
@@ -144,13 +151,17 @@ if [ -n "${existing_hostengine}" ]; then
   warn "nv-hostengine already running (pids: ${existing_hostengine})"
 fi
 
-nv-hostengine --pid /tmp/nv-hostengine.pid --log-level ERROR -f /tmp/nv-hostengine.log || warn "nv-hostengine failed to start; dcgm metrics may be degraded"
+# Ensure exporters logs directory exists under /telemetry
+mkdir -p /telemetry/logs/exporters || true
+
+# Persist hostengine logs under the run telemetry directory
+nv-hostengine --pid /tmp/nv-hostengine.pid --log-level ERROR -f /telemetry/logs/exporters/nv-hostengine.log || warn "nv-hostengine failed to start; dcgm metrics may be degraded"
 
 # Exporters
-node_exporter --web.listen-address=":9100" &
+node_exporter --web.listen-address=":9100" --collector.textfile.directory="${METRICS_DIR}" >>/telemetry/logs/exporters/node-exporter.log 2>&1 &
 node_exporter_pid=$!
 dcgm_collectors="${DCGM_EXPORTER_COLLECTORS:-/etc/dcgm-exporter/metrics.csv}"
-dcgm-exporter --collectors "${dcgm_collectors}" --address :9400 &
+dcgm-exporter --collectors "${dcgm_collectors}" --address :9400 >>/telemetry/logs/exporters/dcgm-exporter.log 2>&1 &
 dcgm_exporter_pid=$!
 
 sleep 1

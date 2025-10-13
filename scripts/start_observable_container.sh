@@ -152,7 +152,7 @@ container_id=$(docker run -d \
           if [ -n "${HOST_UID:-}" ]; then usermod -u "${HOST_UID}" devuser 2>/dev/null || true; fi; \
           chown -R devuser:devuser /home/devuser 2>/dev/null || true; \
         fi; \
-        exec /opt/observability/init-run.sh sleep infinity')
+        exec /workspaces/sglang/.devcontainer/observability/init-run.sh sleep infinity')
 
 echo "${CONTAINER_NAME} is starting (container id ${container_id})."
 

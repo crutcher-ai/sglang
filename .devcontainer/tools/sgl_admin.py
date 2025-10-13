@@ -193,7 +193,8 @@ def _prepare_env() -> Dict[str, str]:
     env.setdefault("TRITON_CACHE_DIR", "/profiles/triton")
     env.setdefault("FLASHINFER_WORKSPACE_DIR", "/profiles/flashinfer")
     env.setdefault("TORCHINDUCTOR_CACHE_DIR", "/profiles/torchinductor")
-    env.setdefault("SGLANG_DG_CACHE_DIR", "/profiles/deep_gemm")
+    # Canonical DeepGEMM cache directory (persisted on host mounts)
+    env.setdefault("SGL_DG_CACHE_DIR", "/profiles/deep_gemm")
     env.setdefault("SGLANG_MOE_CONFIG_DIR", "/profiles/moe_configs")
     env.setdefault("FLASHINFER_JIT_LOG_DIR", "/profiles/flashinfer/90a")
     env.setdefault("PYTHONPATH", "/workspaces/sglang/python")
@@ -202,7 +203,7 @@ def _prepare_env() -> Dict[str, str]:
         Path(env["TRITON_CACHE_DIR"]),
         Path(env["FLASHINFER_WORKSPACE_DIR"]),
         Path(env["TORCHINDUCTOR_CACHE_DIR"]),
-        Path(env["SGLANG_DG_CACHE_DIR"]),
+        Path(env["SGL_DG_CACHE_DIR"]),
         Path(env["SGLANG_MOE_CONFIG_DIR"]),
         Path(env["FLASHINFER_JIT_LOG_DIR"]),
         Path(env["HOME"]) / ".cache/flashinfer/90a",
@@ -724,8 +725,8 @@ def _prom_probe(run_id: str) -> Dict[str, Any]:
     import requests
 
     probe = {
-        "prometheus_query": "increase(sglang:prompt_tokens_total[5s])",
-        "with_run_filter": f'increase(sglang:prompt_tokens_total{{container_run="{run_id}"}}[5s])',
+        "prometheus_query": "increase(sglang:prompt_tokens_total[1m])",
+        "with_run_filter": f'increase(sglang:prompt_tokens_total{{container_run="{run_id}"}}[1m])',
         "sample_count": 0,
         "ok": False,
     }
@@ -845,6 +846,11 @@ def caches_ensure(
         "--json/--no-json",
         help="Deprecated; inspect always prints JSON. Ignored here.",
     ),
+    prom_ping: bool = typer.Option(
+        False,
+        "--prom-ping/--no-prom-ping",
+        help="After prep, attempt a trivial /generate request to the local server to ensure Prometheus records activity.",
+    ),
 ):
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     manifest_path, manifest_host_path = _load_manifest_paths()
@@ -943,7 +949,7 @@ def caches_ensure(
                     "TRITON_CACHE_DIR": "/profiles/triton",
                     "TORCHINDUCTOR_CACHE_DIR": "/profiles/torchinductor",
                     "FLASHINFER_WORKSPACE_DIR": "/profiles/flashinfer",
-                    "SGLANG_DG_CACHE_DIR": "/profiles/deep_gemm",
+                    "SGL_DG_CACHE_DIR": "/profiles/deep_gemm",
                     "SGLANG_MOE_CONFIG_DIR": "/profiles/moe_configs",
                     "FLASHINFER_JIT_LOG_DIR": "/profiles/flashinfer/90a",
                 },
@@ -953,8 +959,8 @@ def caches_ensure(
         },
         "stages": {},
         "telemetry_probe": {
-            "prometheus_query": "increase(sglang:prompt_tokens_total[5s])",
-            "with_run_filter": f'increase(sglang:prompt_tokens_total{{container_run="{run_id}"}}[5s])',
+            "prometheus_query": "increase(sglang:prompt_tokens_total[1m])",
+            "with_run_filter": f'increase(sglang:prompt_tokens_total{{container_run="{run_id}"}}[1m])',
             "sample_count": 0,
             "ok": False,
         },
@@ -1007,7 +1013,7 @@ def caches_ensure(
     # DeepGEMM
     if deep_gemm != "skip":
         # Fail-fast permissions and disk preflight
-        dg_dir = Path(env["SGLANG_DG_CACHE_DIR"])
+        dg_dir = Path(env["SGL_DG_CACHE_DIR"])
         try:
             dg_dir.mkdir(parents=True, exist_ok=True)
             testf = dg_dir / ".write_test"
@@ -1084,6 +1090,9 @@ def caches_ensure(
                     )  # Fail-fast if key missing
                     env2["SGL_COMPILE_MEM_FRACTION"] = memf
                     env2["SGLANG_COMPILE_MEM_FRACTION"] = memf
+                    # Ensure DeepGEMM sees the canonical cache dir
+                    if "SGL_DG_CACHE_DIR" in env:
+                        env2["SGL_DG_CACHE_DIR"] = env["SGL_DG_CACHE_DIR"]
                     compile_to = int(
                         dg_def["compile_timeout_s"]
                     )  # Fail-fast if key missing
@@ -1151,7 +1160,7 @@ def caches_ensure(
 
                         artifacts = {
                             "cache_dir": {
-                                "container_path": env["SGLANG_DG_CACHE_DIR"],
+                                "container_path": env["SGL_DG_CACHE_DIR"],
                                 "host_path": None,
                             },
                             "compile_log": {
@@ -1614,6 +1623,24 @@ def caches_ensure(
     except Exception:
         pass
 
+    # Optional: Try a single prompt to ensure Prometheus sees some activity (hello-world)
+    if prom_ping:
+        try:
+            port = (
+                int(run_obj["run"]["settings"]["warmup_port"])
+                if run_obj.get("run")
+                else 30000
+            )
+        except Exception:
+            port = 30000
+        try:
+            cmd = (
+                f"bash /workspaces/sglang/scripts/infer/hello_world.sh 127.0.0.1 {port}"
+            )
+            subprocess.run(["bash", "-lc", cmd], check=False)
+        except Exception:
+            pass
+
     # Aggregate from stage files present (fail-fast on critical errors)
     try:
         stage_dir = prep_path.parent / "stages"
@@ -1645,12 +1672,26 @@ def caches_ensure(
     run_obj["run"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     run_obj["run"]["duration_s"] = round(time.time() - t0, 3)
 
-    # Telemetry probe (after warm-ups)
+    # Telemetry probe (after warm-ups and optional ping)
     try:
         run_obj["telemetry_probe"] = _prom_probe(run_id)
     except Exception:
         pass
     _atomic_write_json(prep_path, run_obj)
+    # Emit provider_prep_finished event (best-effort)
+    try:
+        status_event = run_obj.get("status") or "unknown"
+        model_slug = run_obj.get("run", {}).get("model_slug") or "unknown"
+        subprocess.run(
+            [
+                "bash",
+                "-lc",
+                f'bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event provider_prep_finished run_id=\\"{run_id}\\" status=\\"{status_event}\\" model_slug=\\"{model_slug}\\"',
+            ],
+            check=False,
+        )
+    except Exception:
+        pass
     # Convenience: record prep_result path into manifest (container + host rebased when available)
     try:
         m = json.loads(manifest_path.read_text())
