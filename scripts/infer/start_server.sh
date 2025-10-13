@@ -27,6 +27,27 @@ OLTP_TRACES_ENDPOINT="${OLTP_TRACES_ENDPOINT:-}"
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+emit_ready_json() {
+  local started_at="$1"
+  python3 - "$RUN_ID" "$HOST_PORT" "$MANIFEST_HOST" "$LOG_FILE" "$started_at" <<'PY'
+import json, sys
+run_id, port, manifest, log_path, started_at = sys.argv[1:]
+try:
+    port_val = int(port)
+except ValueError:
+    port_val = port
+print(json.dumps({
+    "schema_version": 1,
+    "run_id": run_id,
+    "health": "ready",
+    "port": port_val,
+    "manifest_host_path": manifest,
+    "log_file": log_path,
+    "started_at_iso": started_at,
+}))
+PY
+}
+
 [ -f "$RUN_META_FILE" ] || die "manifest pointer not found: $RUN_META_FILE (start the container first)"
 
 MANIFEST_HOST=$(awk -F= '/^CONTAINER_RUN_META_JSON_HOST=/{print $2}' "$RUN_META_FILE" || true)
@@ -51,17 +72,7 @@ PY)
 
 # If healthy already, print status and exit
 if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
-  cat <<EOF
-{
-  "schema_version": 1,
-  "run_id": "$RUN_ID",
-  "health": "ready",
-  "port": $HOST_PORT,
-  "manifest_host_path": "$MANIFEST_HOST",
-  "log_file": "$LOG_FILE",
-  "started_at_iso": "$(now_iso)"
-}
-EOF
+  emit_ready_json "$(now_iso)"
   exit 0
 fi
 
@@ -119,8 +130,14 @@ MAXT=$(val "$cfg_json" maxt)
 MAMBA=$(val "$cfg_json" mamba)
 TRACE=$(val "$cfg_json" trace)
 OTLP=$(val "$cfg_json" otlp)
+MODEL_SLUG="$(basename "$MODEL")"
 
 # Start server in the container (avoid Bash @Q quoting; pass env vars instead)
+# Persist caches into /profiles mounts for the main server as well
+# Fail fast: ensure DeepGEMM cache dir is writable inside the container
+docker exec -u devuser "$CONTAINER_NAME" bash -lc 'test -d /profiles/deep_gemm -a -w /profiles/deep_gemm' \
+  || die "SGL_DG_CACHE_DIR (/profiles/deep_gemm) missing or not writable in container"
+
 docker exec -u devuser \
   -e MODEL="$MODEL" \
   -e MEM="$MEM" \
@@ -132,8 +149,15 @@ docker exec -u devuser \
   -e MAMBA="$MAMBA" \
   -e TRACE="$TRACE" \
   -e OTLP="$OTLP" \
+  -e TRITON_CACHE_DIR="/profiles/triton" \
+  -e TORCHINDUCTOR_CACHE_DIR="/profiles/torchinductor" \
+  -e FLASHINFER_WORKSPACE_DIR="/profiles/flashinfer" \
+  -e FLASHINFER_JIT_LOG_DIR="/profiles/flashinfer/90a" \
+  -e SGL_DG_CACHE_DIR="/profiles/deep_gemm" \
+  -e SGLANG_MOE_CONFIG_DIR="/profiles/moe_configs" \
   -e LOG_FILE="$LOG_FILE" \
   "$CONTAINER_NAME" bash -lc "\
+  bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event sglang_started run_id=\"$RUN_ID\" model_slug=\"$MODEL_SLUG\" tp=\"$TP_SIZE\" kv_cache_dtype=\"$KV\" || true; \
   nohup python -m sglang.launch_server \\
     --model-path \"\$MODEL\" \\
     --host 0.0.0.0 --port $HOST_PORT \\
@@ -155,17 +179,14 @@ READY_TIMEOUT=${READY_TIMEOUT:-180}
 deadline=$((SECONDS+READY_TIMEOUT))
 while [ $SECONDS -lt $deadline ]; do
   if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
-    cat <<EOF
-{
-  "schema_version": 1,
-  "run_id": "$RUN_ID",
-  "health": "ready",
-  "port": $HOST_PORT,
-  "manifest_host_path": "$MANIFEST_HOST",
-  "log_file": "$LOG_FILE",
-  "started_at_iso": "$(now_iso)"
-}
-EOF
+    # Emit sglang_ready event and optional hello-world tick
+    docker exec -u devuser "$CONTAINER_NAME" bash -lc \
+      "bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event sglang_ready run_id=\"$RUN_ID\" model_slug=\"$MODEL_SLUG\" tp=\"$TP_SIZE\" kv_cache_dtype=\"$KV\" || true"
+    if [ "${HELLO_AFTER_READY:-}" = "1" ]; then
+      docker exec -u devuser "$CONTAINER_NAME" bash -lc \
+        'bash /workspaces/sglang/scripts/infer/hello_world.sh 127.0.0.1 '"$HOST_PORT"' || true'
+    fi
+    emit_ready_json "$(now_iso)"
     exit 0
   fi
   sleep 1
