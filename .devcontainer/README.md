@@ -21,7 +21,7 @@ There are two viable flows:
 | Component        | Listen Ports | Host Storage (relative)                       |
 |------------------|--------------|----------------------------------------------|
 | Prometheus       | 9090         | `.devcontainer/storage/prometheus/<run>/`     |
-| Jaeger UI/OTLP   | 16686 / 4317 / 4318 | `.devcontainer/storage/jaeger/<run>/badger/{key,data}` |
+| Jaeger UI/OTLP   | 16686 / 4317 / 4318 | `$HOME/sglang-observability/jaeger-v2/{keys,values}` |
 | node_exporter    | 9100         | n/a (metrics only)                            |
 | dcgm-exporter    | 9400         | n/a (metrics only)                            |
 | SGLang server    | 30000 (router 29000) | user-launched; logs under `$HOME/sglang-observability/telemetry/logs/` |
@@ -74,7 +74,7 @@ $HOME/sglang-observability/
     container_run_meta.env  # pointer to latest manifest (touch/remove managed by init-run)
     container_runs/      # JSON manifest per run (written by init-run.sh)
     prometheus/          # per-run TSDB directories
-    jaeger/              # per-run badger directories
+  jaeger-v2/             # global Badger storage used by host-side Jaeger (keys/, values/)
 ```
 
 Prometheus and Jaeger write to subdirectories named after `CONTAINER_RUN_ID`,
@@ -115,7 +115,7 @@ Every container lifetime produces:
 
 - Log file: `/telemetry/logs/<CONTAINER_RUN_ID>.log`
 - Prometheus TSDB: `/telemetry/prometheus/<CONTAINER_RUN_ID>/`
-- Jaeger storage: `/telemetry/jaeger/<CONTAINER_RUN_ID>/badger/{key,data}`
+- Jaeger storage: global Badger directory at `$HOME/sglang-observability/jaeger-v2/{keys,values}` (persisted outside the helper container)
 - Manifest: `/telemetry/container_runs/<CONTAINER_RUN_ID>.json`
 
 The manifest now includes a `paths` block with both container and host views so automation does not need to guess

@@ -68,11 +68,9 @@ if [[ "${VALIDATE_ONLY:-0}" != "1" ]]; then
   fi
 fi
 
-# Prepare host directories
+# Prepare host directories (per-run paths are created below once RUN_ID is known)
 mkdir -p \
-  "${HOST_TELEMETRY_ROOT}/logs" \
-  "${HOST_TELEMETRY_ROOT}/prometheus" \
-  "${HOST_TELEMETRY_ROOT}/jaeger" \
+  "${HOST_TELEMETRY_ROOT}" \
   "${HOST_MANIFEST_ROOT}" \
   "${HOST_PROFILES_ROOT}" \
   "${HOST_PROFILES_ROOT}/triton" \
@@ -122,6 +120,124 @@ if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+# Generate a run identifier up front so host-side services (Jaeger, manifests) can
+# prepare run-scoped directories before the helper container starts.
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+short_id=$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)
+RUN_ID="container-run-${timestamp}-${short_id}"
+RUN_DIR_HOST="${HOST_TELEMETRY_ROOT}/container_runs/${RUN_ID}"
+RUN_DIR_CONTAINER="/telemetry/container_runs/${RUN_ID}"
+
+mkdir -p "${RUN_DIR_HOST}" || true
+if [[ "${VALIDATE_ONLY:-0}" != "1" ]]; then
+  mkdir -p \
+    "${RUN_DIR_HOST}/logs" \
+    "${RUN_DIR_HOST}/logs/exporters" \
+    "${RUN_DIR_HOST}/prometheus" \
+    "${RUN_DIR_HOST}/metrics" \
+    "${RUN_DIR_HOST}/configs" \
+    "${RUN_DIR_HOST}/jaeger/badger/keys" \
+    "${RUN_DIR_HOST}/jaeger/badger/values"
+  chmod 777 \
+    "${RUN_DIR_HOST}/jaeger" \
+    "${RUN_DIR_HOST}/jaeger/badger" \
+    "${RUN_DIR_HOST}/jaeger/badger/keys" \
+    "${RUN_DIR_HOST}/jaeger/badger/values" >/dev/null 2>&1 || true
+fi
+
+# Ensure Jaeger v2 (OTLP-native) is running on host ports
+ensure_jaeger_v2() {
+  local base_dir="$1"
+  if [[ -z "$base_dir" ]]; then
+    base_dir="$HOME/sglang-observability/jaeger-v2"
+  fi
+
+  local name="jaeger-v2"
+  local image="${JAEGER_V2_IMAGE:-jaegertracing/jaeger:2.11.0}"
+  local cfg_file="${base_dir}/config.yaml"
+  local badger_dir="${base_dir}/badger"
+
+  mkdir -p "${badger_dir}/keys" "${badger_dir}/values"
+  chmod 777 "$base_dir" "${badger_dir}" "${badger_dir}/keys" "${badger_dir}/values" >/dev/null 2>&1 || true
+
+  # Write authoritative Jaeger v2 config (OTLP receivers, Badger storage, query UI, health)
+  cat > "$cfg_file" <<'YAML'
+service:
+  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: badger_store
+
+processors:
+  batch: {}
+
+extensions:
+  healthcheckv2:
+    use_v2: true  # v2 HTTP health surface lives behind this gate; without it /status stays silent
+    http:
+      endpoint: 0.0.0.0:13133
+      status:
+        enabled: true
+  jaeger_query:
+    storage:
+      traces: badger_store
+    grpc:
+      endpoint: 0.0.0.0:16685
+    http:
+      endpoint: 0.0.0.0:16686
+  jaeger_storage:
+    backends:
+      badger_store:
+        badger:
+          directories:
+            keys: /badger/keys
+            values: /badger/values
+          ephemeral: false
+YAML
+  local run_root="$(dirname "${base_dir}")"
+  local run_configs_dir="${run_root}/configs"
+  mkdir -p "${run_configs_dir}" >/dev/null 2>&1 || true
+  cp -f "${cfg_file}" "${run_configs_dir}/jaeger.yaml" >/dev/null 2>&1 || true
+  local cid
+  # Always recreate to avoid stale startup flags; data persists via bind mounts
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  echo "Starting Jaeger v2 (name=${name})"
+  docker run -d --name "$name" \
+    -p 16686:16686 -p 4317:4317 -p 4318:4318 -p 13133:13133 \
+    -v "$cfg_file":/etc/jaeger/config.yaml:ro \
+    -v "${badger_dir}":/badger \
+    "$image" \
+    --config=/etc/jaeger/config.yaml >/dev/null
+  # wait for UI port to answer (any HTTP status)
+  local ready_url="${JAEGER_V2_READY_URL:-http://localhost:13133/status}"
+  for _ in {1..60}; do
+    if curl -s -o /dev/null "$ready_url"; then
+      echo "Jaeger v2 ready: UI http://localhost:16686 OTLP gRPC 127.0.0.1:4317 (health $ready_url)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: Jaeger v2 did not become ready on port 16686 (URL=$ready_url)" >&2
+  docker logs --tail 100 "$name" >&2 || true
+  exit 1
+}
+
+ensure_jaeger_v2 "${RUN_DIR_HOST}/jaeger"
+
 INIT_HOOK="/workspaces/sglang/.devcontainer/post-create.sh"
 
 container_id=$(docker run -d \
@@ -137,6 +253,9 @@ container_id=$(docker run -d \
   -e HOST_PROFILES_ROOT="${HOST_PROFILES_ROOT}" \
   -e HOST_MODELS_ROOT="${HOST_MODELS_ROOT}" \
   -e HOST_MANIFEST_ROOT="${HOST_MANIFEST_ROOT}" \
+  -e CONTAINER_RUN_ID_OVERRIDE="${RUN_ID}" \
+  -e RUN_ROOT_OVERRIDE="${RUN_DIR_CONTAINER}" \
+  -e HOST_RUN_DIR="${RUN_DIR_HOST}" \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   -e RUN_FILE_UID="$(id -u)" -e RUN_FILE_GID="$(id -g)" \
   --entrypoint /bin/bash \

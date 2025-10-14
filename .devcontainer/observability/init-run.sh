@@ -1,19 +1,117 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG_ROOT="${LOG_ROOT:-/telemetry/logs}"
 RUN_META_FILE="${RUN_META_FILE:-/telemetry/container_run_meta.env}"
-PROM_STORAGE_ROOT="${PROM_STORAGE_ROOT:-/telemetry/prometheus}"
-JAEGER_STORAGE_ROOT="${JAEGER_STORAGE_ROOT:-/telemetry/jaeger}"
-RUN_MANIFEST_ROOT="${RUN_MANIFEST_ROOT:-/telemetry/container_runs}"
 PROM_CONFIG_TEMPLATE="${PROM_CONFIG_TEMPLATE:-/opt/observability/prometheus.yml.tmpl}"
-PROM_CONFIG_FILE="${PROM_CONFIG_FILE:-/telemetry/prometheus/prometheus.yml}"
 
 as_devuser() {
   sudo -u devuser -E "$@"
 }
 
-as_devuser mkdir -p "${LOG_ROOT}" "${PROM_STORAGE_ROOT}" "${JAEGER_STORAGE_ROOT}" "${RUN_MANIFEST_ROOT}"
+
+container_run_id="${CONTAINER_RUN_ID_OVERRIDE:-}"
+if [ -z "${container_run_id}" ]; then
+  timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+  short_id=$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)
+  container_run_id="container-run-${timestamp}-${short_id}"
+fi
+
+RUN_ROOT_DEFAULT="/telemetry/container_runs/${container_run_id}"
+RUN_ROOT="${RUN_ROOT_OVERRIDE:-${RUN_ROOT:-${RUN_ROOT_DEFAULT}}}"
+LOG_ROOT="${LOG_ROOT:-${RUN_ROOT}/logs}"
+PROM_STORAGE_ROOT="${PROM_STORAGE_ROOT:-${RUN_ROOT}/prometheus}"
+PROM_CONFIG_FILE="${PROM_CONFIG_FILE:-${RUN_ROOT}/configs/prometheus.yml}"
+CONFIGS_DIR="${CONFIGS_DIR:-${PROM_CONFIG_FILE%/*}}"
+JAEGER_STORAGE_ROOT="${JAEGER_STORAGE_ROOT:-${RUN_ROOT}/jaeger}"
+RUN_MANIFEST_ROOT="${RUN_MANIFEST_ROOT:-${RUN_ROOT}}"
+METRICS_DIR="${METRICS_DIR:-${RUN_ROOT}/metrics}"
+EXPORTER_LOG_ROOT="${EXPORTER_LOG_ROOT:-${LOG_ROOT}/exporters}"
+
+meta_dir="$(dirname "${RUN_META_FILE}")"
+as_devuser install -d -m 770 "${meta_dir}"
+
+as_devuser install -d -m 770 "${RUN_ROOT}"
+as_devuser mkdir -p \
+  "${LOG_ROOT}" \
+  "${EXPORTER_LOG_ROOT}" \
+  "${PROM_STORAGE_ROOT}" \
+  "${RUN_MANIFEST_ROOT}" \
+  "${METRICS_DIR}" \
+  "${JAEGER_STORAGE_ROOT}" \
+  "${CONFIGS_DIR}"
+
+log_file="${LOG_ROOT}/observability.log"
+as_devuser touch "${log_file}"
+as_devuser chmod 600 "${log_file}"
+
+prom_storage_dir="${PROM_STORAGE_ROOT}"
+jaeger_run_root="${JAEGER_STORAGE_ROOT}"
+
+manifest_json="${RUN_MANIFEST_ROOT}/manifest.json"
+
+host_run_dir="${HOST_RUN_DIR:-}"
+host_manifest_root="${HOST_MANIFEST_ROOT:-}"
+if [ -n "${host_run_dir}" ]; then
+  host_manifest_path="${host_run_dir}/manifest.json"
+else
+  host_manifest_path="${host_manifest_root}/${container_run_id}.json"
+fi
+
+host_telemetry_root="${HOST_TELEMETRY_ROOT:-}"
+host_profiles_root="${HOST_PROFILES_ROOT:-}"
+if [ -z "${host_run_dir}" ] && ([ -z "${host_telemetry_root}" ] || [ -z "${host_profiles_root}" ]); then
+  warn "HOST telem/profiles roots not set; host paths in manifest may be unusable"
+fi
+
+if [ -n "${host_run_dir}" ]; then
+  host_prometheus_path="${host_run_dir}/prometheus"
+  host_jaeger_path="${host_run_dir}/jaeger"
+  host_log_path="${host_run_dir}/logs/observability.log"
+  host_metrics_path="${host_run_dir}/metrics"
+  host_configs_path="${host_run_dir}/configs"
+else
+  host_prometheus_path="${host_telemetry_root:+${host_telemetry_root}/prometheus/${container_run_id}}"
+  host_jaeger_path="${host_telemetry_root:+${host_telemetry_root}/jaeger/${container_run_id}}"
+  host_log_path="${host_telemetry_root:+${host_telemetry_root}/logs/${container_run_id}.log}"
+  host_metrics_path="${host_telemetry_root:+${host_telemetry_root}/metrics}"
+  host_configs_path=""
+fi
+
+if [ -n "${host_run_dir}" ]; then
+  host_exporter_logs_path="${host_run_dir}/logs/exporters"
+elif [ -n "${host_telemetry_root}" ]; then
+  host_exporter_logs_path="${host_telemetry_root}/logs/exporters"
+else
+  host_exporter_logs_path=""
+fi
+
+host_profiles_path="${host_profiles_root}"
+
+if [ -n "${host_run_dir}" ]; then
+  host_run_dir_effective="${host_run_dir}"
+else
+  host_run_dir_effective="${host_telemetry_root}"
+fi
+
+{
+  echo "CONTAINER_RUN_META_JSON=${manifest_json}"
+  if [ -n "${host_manifest_path}" ]; then
+    echo "CONTAINER_RUN_META_JSON_HOST=${host_manifest_path}"
+  fi
+} | as_devuser tee "${RUN_META_FILE}" >/dev/null
+as_devuser chmod 600 "${RUN_META_FILE}"
+
+export CONTAINER_RUN_ID="${container_run_id}"
+export CONTAINER_RUN_META_JSON="${manifest_json}"
+export RUN_ROOT
+export METRICS_DIR
+if [ -n "${host_manifest_path}" ]; then
+  export CONTAINER_RUN_META_JSON_HOST="${host_manifest_path}"
+fi
+
+exec > >(tee -a "${log_file}") 2>&1
+
+echo "Initialized container run: ${container_run_id}"
 
 warnings=()
 
@@ -48,71 +146,6 @@ ensure_dcgm_capability() {
   fi
 }
 
-timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-short_id=$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)
-container_run_id="container-run-${timestamp}-${short_id}"
-log_file="${LOG_ROOT}/${container_run_id}.log"
-
-prom_storage_dir="${PROM_STORAGE_ROOT}/${container_run_id}"
-jaeger_run_root="${JAEGER_STORAGE_ROOT}/${container_run_id}"
-jaeger_key_dir="${jaeger_run_root}/badger/key"
-jaeger_value_dir="${jaeger_run_root}/badger/data"
-
-mkdir -p "${prom_storage_dir}" "${jaeger_key_dir}" "${jaeger_value_dir}" "$(dirname "${PROM_CONFIG_FILE}")"
-
-as_devuser touch "${log_file}"
-as_devuser chmod 600 "${log_file}"
-
-meta_dir="$(dirname "${RUN_META_FILE}")"
-as_devuser install -d -m 770 "${meta_dir}"
-
-as_devuser mkdir -p "${RUN_MANIFEST_ROOT}"
-# Textfile collector directory for run-scoped events
-METRICS_DIR="${METRICS_DIR:-/telemetry/metrics}"
-as_devuser mkdir -p "${METRICS_DIR}"
-manifest_json="${RUN_MANIFEST_ROOT}/${container_run_id}.json"
-
-host_manifest_root="${HOST_MANIFEST_ROOT:-}"
-host_manifest_path=""
-if [ -n "${host_manifest_root}" ]; then
-  host_manifest_path="${host_manifest_root}/${container_run_id}.json"
-fi
-
-host_telemetry_root="${HOST_TELEMETRY_ROOT:-}"
-host_profiles_root="${HOST_PROFILES_ROOT:-}"
-if [ -z "${host_telemetry_root}" ] || [ -z "${host_profiles_root}" ]; then
-  warn "HOST_TELEMETRY_ROOT or HOST_PROFILES_ROOT not set; host paths in manifest may be unusable"
-fi
-
-if [ -n "${host_telemetry_root}" ]; then
-  host_prometheus_path="${host_telemetry_root}/prometheus/${container_run_id}"
-  host_jaeger_path="${host_telemetry_root}/jaeger/${container_run_id}"
-  host_log_path="${host_telemetry_root}/logs/${container_run_id}.log"
-else
-  host_prometheus_path=""
-  host_jaeger_path=""
-  host_log_path=""
-fi
-
-host_profiles_path="${host_profiles_root}"
-
-{
-  echo "CONTAINER_RUN_META_JSON=${manifest_json}"
-  if [ -n "${host_manifest_path}" ]; then
-    echo "CONTAINER_RUN_META_JSON_HOST=${host_manifest_path}"
-  fi
-} | as_devuser tee "${RUN_META_FILE}" >/dev/null
-as_devuser chmod 600 "${RUN_META_FILE}"
-
-export CONTAINER_RUN_ID="${container_run_id}"
-export CONTAINER_RUN_META_JSON="${manifest_json}"
-if [ -n "${host_manifest_path}" ]; then
-  export CONTAINER_RUN_META_JSON_HOST="${host_manifest_path}"
-fi
-
-exec > >(tee -a "${log_file}") 2>&1
-
-echo "Initialized container run: ${container_run_id}"
 
 # Emit container_started event (best-effort)
 bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event container_started run_id="${container_run_id}" || true
@@ -121,11 +154,6 @@ trap 'bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event cont
 eval "${PROMETHEUS_EXTRA_ENV:-true}" >/dev/null 2>&1 || true
 
 ensure_dcgm_capability
-
-export SPAN_STORAGE_TYPE=badger
-export BADGER_EPHEMERAL=false
-export BADGER_DIRECTORY_KEY="${jaeger_key_dir}"
-export BADGER_DIRECTORY_VALUE="${jaeger_value_dir}"
 
 if [ -f "${PROM_CONFIG_TEMPLATE}" ]; then
   CONTAINER_RUN_ID="${container_run_id}" envsubst < "${PROM_CONFIG_TEMPLATE}" > "${PROM_CONFIG_FILE}"
@@ -138,30 +166,23 @@ prometheus \
   --web.listen-address="0.0.0.0:9090" &
 prometheus_pid=$!
 
-jaeger-all-in-one \
-  --collector.otlp.enabled=true \
-  --collector.otlp.grpc.host-port=":4317" \
-  --collector.otlp.http.host-port=":4318" \
-  --admin.http.host-port=":14269" &
-jaeger_pid=$!
-
 # Start DCGM hostengine and rely on dcgm-exporter to load profiling modules
 existing_hostengine=$(pgrep -x nv-hostengine || true)
 if [ -n "${existing_hostengine}" ]; then
   warn "nv-hostengine already running (pids: ${existing_hostengine})"
 fi
 
-# Ensure exporters logs directory exists under /telemetry
-mkdir -p /telemetry/logs/exporters || true
+# Ensure exporters logs directory exists under the run telemetry directory
+mkdir -p "${EXPORTER_LOG_ROOT}" || true
 
 # Persist hostengine logs under the run telemetry directory
-nv-hostengine --pid /tmp/nv-hostengine.pid --log-level ERROR -f /telemetry/logs/exporters/nv-hostengine.log || warn "nv-hostengine failed to start; dcgm metrics may be degraded"
+nv-hostengine --pid /tmp/nv-hostengine.pid --log-level ERROR -f "${EXPORTER_LOG_ROOT}/nv-hostengine.log" || warn "nv-hostengine failed to start; dcgm metrics may be degraded"
 
 # Exporters
-node_exporter --web.listen-address=":9100" --collector.textfile.directory="${METRICS_DIR}" >>/telemetry/logs/exporters/node-exporter.log 2>&1 &
+node_exporter --web.listen-address=":9100" --collector.textfile.directory="${METRICS_DIR}" >>"${EXPORTER_LOG_ROOT}/node-exporter.log" 2>&1 &
 node_exporter_pid=$!
 dcgm_collectors="${DCGM_EXPORTER_COLLECTORS:-/etc/dcgm-exporter/metrics.csv}"
-dcgm-exporter --collectors "${dcgm_collectors}" --address :9400 >>/telemetry/logs/exporters/dcgm-exporter.log 2>&1 &
+dcgm-exporter --collectors "${dcgm_collectors}" --address :9400 >>"${EXPORTER_LOG_ROOT}/dcgm-exporter.log" 2>&1 &
 dcgm_exporter_pid=$!
 
 sleep 1
@@ -214,16 +235,24 @@ cat <<EOF | as_devuser tee "${manifest_json}" >/dev/null
   },
   "paths": {
     "container": {
-      "telemetry_root": "/telemetry",
+      "run_dir": "${RUN_ROOT}",
+      "telemetry_root": "${RUN_ROOT}",
       "prometheus_dir": "${prom_storage_dir}",
       "jaeger_dir": "${jaeger_run_root}",
+      "metrics_dir": "${METRICS_DIR}",
+      "exporter_logs_dir": "${EXPORTER_LOG_ROOT}",
+      "configs_dir": "${CONFIGS_DIR}",
       "log_file": "${log_file}",
       "profiles_root": "/profiles"
     },
     "host": {
-      "telemetry_root": "${host_telemetry_root}",
+      "run_dir": "${host_run_dir_effective}",
+      "telemetry_root": "${host_run_dir_effective}",
       "prometheus_dir": "${host_prometheus_path}",
       "jaeger_dir": "${host_jaeger_path}",
+      "metrics_dir": "${host_metrics_path}",
+      "exporter_logs_dir": "${host_exporter_logs_path}",
+      "configs_dir": "${host_configs_path}",
       "log_file": "${host_log_path}",
       "profiles_root": "${host_profiles_path}"
     }
@@ -249,7 +278,15 @@ cat <<EOF | as_devuser tee "${manifest_json}" >/dev/null
   "storage": {
     "log_file": "${log_file}",
     "prometheus_dir": "${prom_storage_dir}",
-    "jaeger_dir": "${jaeger_run_root}"
+    "prometheus_config": "${PROM_CONFIG_FILE}",
+    "jaeger_dir": "${jaeger_run_root}",
+    "jaeger_config": "${jaeger_run_root}/config.yaml",
+    "metrics_dir": "${METRICS_DIR}",
+    "exporter_logs_dir": "${EXPORTER_LOG_ROOT}"
+  },
+  "configs": {
+    "prometheus": "${PROM_CONFIG_FILE}",
+    "jaeger": "${jaeger_run_root}/config.yaml"
   },
   "exporters_state": {
     "node_exporter": "${node_exporter_state}",
@@ -270,7 +307,7 @@ if [ -n "${host_manifest_path}" ]; then
   echo "CONTAINER_RUN_META_JSON_HOST=${host_manifest_path}"
 fi
 
-echo "Background services started: Prometheus, Jaeger, node_exporter, dcgm-exporter"
+echo "Background services started: Prometheus, node_exporter, dcgm-exporter (Jaeger v2 runs on host ports)"
 
 export PYTHONPATH="/workspaces/sglang/python${PYTHONPATH:+:${PYTHONPATH}}"
 
