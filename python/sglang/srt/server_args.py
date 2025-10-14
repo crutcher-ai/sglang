@@ -164,6 +164,9 @@ class ServerArgs:
     load_format: str = "auto"
     model_loader_extra_config: str = "{}"
     trust_remote_code: bool = False
+    modelopt_quant: Optional[Union[str, Dict]] = None
+    modelopt_checkpoint_restore_path: Optional[str] = None
+    modelopt_checkpoint_save_path: Optional[str] = None
     context_length: Optional[int] = None
     is_embedding: bool = False
     enable_multimodal: Optional[bool] = None
@@ -297,6 +300,7 @@ class ServerArgs:
     speculative_algorithm: Optional[str] = None
     speculative_draft_model_path: Optional[str] = None
     speculative_draft_model_revision: Optional[str] = None
+    speculative_draft_load_format: Optional[str] = None
     speculative_num_steps: Optional[int] = None
     speculative_eagle_topk: Optional[int] = None
     speculative_num_draft_tokens: Optional[int] = None
@@ -1465,6 +1469,29 @@ class ServerArgs:
             "default to 1.0, which may cause accuracy issues. ",
         )
         parser.add_argument(
+            "--modelopt-quant",
+            type=str,
+            default=ServerArgs.modelopt_quant,
+            help="The ModelOpt quantization configuration. "
+            "Supported values: 'fp8', 'int4_awq', 'w4a8_awq', 'nvfp4', 'nvfp4_awq'. "
+            "This requires the NVIDIA Model Optimizer library to be installed: pip install nvidia-modelopt",
+        )
+        parser.add_argument(
+            "--modelopt-checkpoint-restore-path",
+            type=str,
+            default=ServerArgs.modelopt_checkpoint_restore_path,
+            help="Path to restore a previously saved ModelOpt quantized checkpoint. "
+            "If provided, the quantization process will be skipped and the model "
+            "will be loaded from this checkpoint.",
+        )
+        parser.add_argument(
+            "--modelopt-checkpoint-save-path",
+            type=str,
+            default=ServerArgs.modelopt_checkpoint_save_path,
+            help="Path to save the ModelOpt quantized checkpoint after quantization. "
+            "This allows reusing the quantized model in future runs.",
+        )
+        parser.add_argument(
             "--kv-cache-dtype",
             type=str,
             default=ServerArgs.kv_cache_dtype,
@@ -2076,6 +2103,15 @@ class ServerArgs:
             help="The specific draft model version to use. It can be a branch "
             "name, a tag name, or a commit id. If unspecified, will use "
             "the default version.",
+        )
+        parser.add_argument(
+            "--speculative-draft-load-format",
+            type=str,
+            default=ServerArgs.speculative_draft_load_format,
+            choices=LOAD_FORMAT_CHOICES,
+            help="The format of the draft model weights to load. "
+            "If not specified, will use the same format as --load-format. "
+            "Use 'dummy' to initialize draft model weights with random values for profiling.",
         )
         parser.add_argument(
             "--speculative-num-steps",
