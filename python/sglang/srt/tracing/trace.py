@@ -184,7 +184,12 @@ def process_tracing_init(otlp_endpoint, server_name):
         return
 
     try:
-        resource = Resource.get_default().merge(
+        if hasattr(Resource, "get_default"):
+            default_resource = Resource.get_default()
+        else:
+            default_resource = Resource.create({})
+
+        resource = default_resource.merge(
             Resource.create(
                 attributes={
                     SERVICE_NAME: server_name,
