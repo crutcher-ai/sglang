@@ -20,7 +20,7 @@ import logging
 import os
 import random
 import tempfile
-from typing import List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 import orjson
 
