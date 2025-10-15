@@ -36,7 +36,11 @@ def test_mixer2_gated_norm_multi_gpu(
     if not torch.cuda.is_available():
         pytest.skip("CUDA device not available")
 
-    assert torch.cuda.device_count() == NUM_GPUS
+    device_count = torch.cuda.device_count()
+    if device_count < NUM_GPUS:
+        pytest.skip(f"Test requires {NUM_GPUS} GPUs; detected {device_count}.")
+
+    assert device_count == NUM_GPUS
 
     hidden_size, n_groups = hidden_size_n_groups
     num_processes = NUM_GPUS

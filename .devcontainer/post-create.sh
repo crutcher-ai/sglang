@@ -27,6 +27,10 @@ else
     sudo -u devuser -E ${PYTHON_BIN} -m pip install -e /workspaces/sglang/python
 fi
 
+# Hugging Face transformers is required for vision/video smoke tests; install it once during container setup
+TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-4.57.0}"
+sudo -u devuser -E ${PYTHON_BIN} -m pip install "transformers==${TRANSFORMERS_VERSION}"
+
 # Quick sanity check so failures surface during container creation.
 sudo -u devuser -E ${PYTHON_BIN} - <<'PY'
 import sys
