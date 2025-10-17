@@ -31,6 +31,29 @@ logger = logging.getLogger(__name__)
 opentelemetry_imported = False
 tracing_enabled = False
 
+TRACE_PROBE_FILE = os.environ.get("TRACE_PROBE_FILE", "/telemetry/trace_probe.log")
+
+
+def _trace_probe(message: str) -> None:
+    if not message:
+        return
+    formatted = f"[trace.py:{os.getpid()}] {message}\n"
+    try:
+        with open(TRACE_PROBE_FILE, "a", encoding="utf-8") as fp:
+            fp.write(formatted)
+    except Exception:
+        print(formatted.rstrip(), flush=True)
+
+
+def _debug_log(message: str):
+    debug_enabled = (
+        os.environ.get("SGL_DEBUG") == "1" or os.environ.get("SGLANG_DEBUG") == "1"
+    )
+    prefix = "trace_debug" if debug_enabled else "trace_probe"
+    logger.info("[%s] %s", prefix, message)
+    _trace_probe(f"{prefix} {message}")
+
+
 try:
     from opentelemetry import context, propagate, trace
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -181,9 +204,15 @@ def process_tracing_init(otlp_endpoint, server_name):
     global __get_cur_time_ns
     if not opentelemetry_imported:
         tracing_enabled = False
+        _debug_log(
+            f"process_tracing_init skipped (opentelemetry missing) endpoint={otlp_endpoint}"
+        )
         return
 
     try:
+        _debug_log(
+            f"process_tracing_init start endpoint={otlp_endpoint} server={server_name}"
+        )
         if hasattr(Resource, "get_default"):
             default_resource = Resource.get_default()
         else:
@@ -205,16 +234,23 @@ def process_tracing_init(otlp_endpoint, server_name):
         )
         tracer_provider.add_span_processor(processor)
         trace.set_tracer_provider(tracer_provider)
+        _debug_log(
+            f"process_tracing_init success endpoint={otlp_endpoint} resource={resource.attributes}"
+        )
     except Exception as e:
         logger.error(f": initialize opentelemetry error:{e}")
         logger.warning("pelease set correct otlp endpoint")
         tracing_enabled = False
+        _debug_log(f"process_tracing_init failed endpoint={otlp_endpoint} error={e}")
         return
 
     if hasattr(time, "time_ns"):
         __get_cur_time_ns = lambda: int(time.time_ns())
 
     tracing_enabled = True
+    _debug_log(
+        f"process_tracing_init enabled endpoint={otlp_endpoint} tracing_enabled={tracing_enabled}"
+    )
 
 
 # Should be called by each tracked thread.
@@ -222,10 +258,16 @@ def trace_set_thread_info(
     thread_label: str, tp_rank: Optional[int] = None, dp_rank: Optional[int] = None
 ):
     if not tracing_enabled:
+        _debug_log(
+            f"trace_set_thread_info skipped (tracing_disabled) thread_label={thread_label}"
+        )
         return
 
     pid = threading.get_native_id()
     if pid in threads_info:
+        _debug_log(
+            f"trace_set_thread_info exists thread_label={thread_label} pid={pid}"
+        )
         return
 
     threads_info[pid] = SglangTraceThreadInfo(
@@ -235,6 +277,9 @@ def trace_set_thread_info(
         tp_rank=tp_rank,
         dp_rank=dp_rank,
         tracer=trace.get_tracer("sglang server"),
+    )
+    _debug_log(
+        f"trace_set_thread_info registered thread_label={thread_label} pid={pid} tp={tp_rank} dp={dp_rank}"
     )
 
 
@@ -340,6 +385,7 @@ def trace_req_start(
     ts: Optional[int] = None,
 ):
     if not tracing_enabled:
+        _debug_log(f"trace_req_start skipped (tracing_disabled) rid={rid}")
         return
 
     rid = str(rid)
@@ -348,7 +394,12 @@ def trace_req_start(
 
     pid = threading.get_native_id()
     if pid not in threads_info:
-        return
+        trace_set_thread_info("unknown")
+        if pid not in threads_info:
+            _debug_log(
+                f"trace_req_start aborted (thread_unregistered) rid={rid} pid={pid}"
+            )
+            return
 
     # create req context and root span
     reqs_context[rid] = SglangTraceReqContext(
@@ -377,6 +428,9 @@ def trace_req_start(
     )
     if container_run:
         root_span.set_attribute("container_run", container_run)
+    _debug_log(
+        f"trace_req_start span_created rid={rid} pid={pid} container_run={container_run}"
+    )
 
     reqs_context[rid].root_span = root_span
     reqs_context[rid].root_span_context = trace.set_span_in_context(root_span)

@@ -1,13 +1,13 @@
 # Tracing Ops — Jaeger v2 + Upstream SGLang
 
-## Start order
-- Ensure Jaeger v2 (host ports):
-  - `./scripts/start_observable_container.sh` (starts Prometheus/node/dcgm as before, and ensures Jaeger v2 on host ports 4317/4318/16686 with Badger persistence)
-  - The helper always recreates the Jaeger container with the YAML config (data persists via bind mounts), so you don't need to clean up manually.
-  - Readiness probe: `curl -fsS http://localhost:13133/status` (HTTP 200 = ready).
-- Start SGLang with upstream flags only:
+## Start Order
+- Start the observability helper + Jaeger v2 on host ports:
+  - `./scripts/start_observable_container.sh`
+  - The helper recreates the Jaeger v2 container (data persists via bind mounts). Health: `curl -fsS http://localhost:13133/status` → HTTP 200.
+- Start the SGLang server with upstream flags only:
   - `ENABLE_TRACE=1 OTEL_TRACES_SAMPLER=always_on ./scripts/infer/start_server.sh`
-- Run SLICE‑Bench; it queries Jaeger v2 API v3 and writes evidence JSONs.
+  - On ready, the script prints one JSON line and writes the exact JSON atomically to `logs/provider_sessions/<ISO>_<SESSION>/start.json`.
+- Run SLICE‑Bench or your workload; Jaeger queries use API v3.
 
 ## One‑liner to start Jaeger v2 manually (optional)
 ```
@@ -89,20 +89,31 @@ with tracer.start_as_current_span("smoke-span"):
 provider.shutdown()
 ```
 
-## Per-run artefacts
-- The helper now emits one directory per container run: `$HOST/sglang-observability/telemetry/container_runs/<RUN_ID>/`.
-- Each run folder contains the manifest, logs, Prometheus TSDB, Jaeger Badger store, textfile metrics, and a `configs/` snapshot (Prometheus + Jaeger YAML).
-- Inside the helper container the same tree is mounted at `/telemetry/container_runs/<RUN_ID>/`, so SLICE-Bench can copy artefacts without chasing multiple roots.
+## Per-Run Artefacts
+- `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/`
+  - `manifest.json` (authoritative per‑run manifest)
+  - `logs/observability.log` (helper + server breadcrumbs)
+  - `logs/provider_sessions/<ISO>_<SESSION>/start.json` (authoritative session metadata; atomic write)
+  - `prometheus/` (Prometheus TSDB)
+  - `jaeger/badger/{keys,values}/` (Jaeger v2 store)
+  - `configs/` (Prometheus + Jaeger YAML snapshots)
 
-## Verify (evidence‑first)
-- UI: http://localhost:16686 (service `sglang`)
-- Files under run_dir/telemetry:
-  - `jaeger_services.json` includes `sglang`
-  - `jaeger_probe.json` has `result.resourceSpans` populated
-  - `jaeger_traces.json` has `result.resourceSpans` populated
-  - All Jaeger API calls use `/api/v3/*` with nested `query.*` parameters
+## Verify (Evidence‑First)
+- UI: http://localhost:16686 (service `sglang`).
+- Files under your run dir:
+  - `telemetry/jaeger_services.json` includes `sglang`.
+  - `telemetry/jaeger_probe.json` has `result.resourceSpans` populated.
+  - `telemetry/jaeger_traces.json` has `result.resourceSpans` populated after filtering.
+  - All Jaeger API calls use `/api/v3/*` with nested `query.*` parameters.
+
+## Attach to an Existing Session
+- Use the read‑only helper: `scripts/infer/session_info.sh --manifest <ABS_MANIFEST_PATH>`.
+- Prints the newest `logs/provider_sessions/*/start.json` verbatim. Exit codes:
+  - 0: success; 2: inconsistent/missing session start.json; 3: bad pointer/manifest; 4: runtime error.
+- There are no fallbacks (no log scanning, no synthesized metadata).
 
 ## Notes
-- No Jaeger v1 fallback. No custom run tags in this pass.
+- No Jaeger v1 fallback.
 - Upstream SGLang flags only: `--enable-trace` and `--oltp-traces-endpoint <host:port>`.
 - Jaeger v3 responses are OTLP JSON envelopes (`result.resourceSpans[...]`); the legacy `data[]` payload is gone by design.
+- Tracing resource attributes: `container_run=<RUN_ID>`, `service.instance.id=<SERVER_SESSION_ID>`.

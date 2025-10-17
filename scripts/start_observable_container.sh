@@ -238,7 +238,51 @@ YAML
 
 ensure_jaeger_v2 "${RUN_DIR_HOST}/jaeger"
 
-INIT_HOOK="/workspaces/sglang/.devcontainer/post-create.sh"
+verify_jaeger_otlp_ready() {
+  python3 - <<'PY'
+import grpc
+import time
+import sys
+
+deadline = time.time() + 60
+while time.time() < deadline:
+    channel = grpc.insecure_channel("127.0.0.1:4317")
+    try:
+        grpc.channel_ready_future(channel).result(timeout=1)
+        sys.exit(0)
+    except grpc.FutureTimeoutError:
+        time.sleep(1)
+
+sys.exit(1)
+PY
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Jaeger OTLP endpoint 127.0.0.1:4317 did not become ready" >&2
+    exit 1
+  fi
+}
+
+verify_jaeger_otlp_ready
+
+# Jaeger health reports ready before the v3 query API is served.
+# Poll the /api/v3/services endpoint until it returns HTTP 200 to avoid 404s
+# in downstream telemetry collectors (e.g., the integration smoke test).
+jaeger_ready=false
+for _ in {1..60}; do
+  http_code=$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:16686/api/v3/services' || echo "")
+  if [ "${http_code}" = "200" ]; then
+    jaeger_ready=true
+    break
+  fi
+  sleep 1
+done
+
+if [ "${jaeger_ready}" != "true" ]; then
+  echo "ERROR: Jaeger v2 query API (16686) never became ready" >&2
+  docker logs --tail 100 jaeger-v2 >&2 || true
+  exit 1
+fi
+
+INIT_HOOK="/sgl-workspace/sglang/.devcontainer/post-create.sh"
 
 container_id=$(docker run -d \
   --name "${CONTAINER_NAME}" \
@@ -262,8 +306,8 @@ container_id=$(docker run -d \
   -v "${HOST_TELEMETRY_ROOT}:/telemetry" \
   -v "${HOST_PROFILES_ROOT}:/profiles" \
   -v "${HOST_MODELS_ROOT}:/models" \
-  -v "${ROOT_DIR}:/workspaces/sglang" \
-  -w /workspaces/sglang \
+  -v "${ROOT_DIR}:/sgl-workspace/sglang" \
+  -w /sgl-workspace/sglang \
   "${IMAGE_NAME}" \
   -lc 'set -e; \
         if id devuser >/dev/null 2>&1; then \
@@ -271,7 +315,7 @@ container_id=$(docker run -d \
           if [ -n "${HOST_UID:-}" ]; then usermod -u "${HOST_UID}" devuser 2>/dev/null || true; fi; \
           chown -R devuser:devuser /home/devuser 2>/dev/null || true; \
         fi; \
-        exec /workspaces/sglang/.devcontainer/observability/init-run.sh sleep infinity')
+        exec /sgl-workspace/sglang/.devcontainer/observability/init-run.sh sleep infinity')
 
 echo "${CONTAINER_NAME} is starting (container id ${container_id})."
 

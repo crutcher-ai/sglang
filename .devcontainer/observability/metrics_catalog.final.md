@@ -122,7 +122,16 @@ example launcher). Traces are stored in `/telemetry/jaeger/<CONTAINER_RUN_ID>/`.
 - Prometheus TSDB: `/telemetry/prometheus/<CONTAINER_RUN_ID>/`
 - Jaeger Badger DB: `/telemetry/jaeger/<CONTAINER_RUN_ID>/`
 
-## 6. Limitations & Known Gaps
+## 6. Labeling Model & Known Gaps
+
+- Metrics labeling:
+  - All series include `container_run="<RUN_ID>"` via Prometheus external_labels.
+  - Metrics do not include `server_session_id` or `inference_id` labels (by design) to keep cardinality bounded. Session
+    scoping is provided by tracing (below).
+
+- Tracing labeling:
+  - OTEL resource attributes include `container_run=<RUN_ID>` and `service.instance.id=<SERVER_SESSION_ID>`. Managed
+    telemetry in consumers should filter Jaeger v3 results by `service.instance.id` to isolate a session.
 
 - **Grace↔Hopper C2C metrics:** The expected perf PMUs (`nvidia_nvlink_c2c*`,
   `nvidia_scf_pmu*`) are not exposed on this VM (no device nodes in

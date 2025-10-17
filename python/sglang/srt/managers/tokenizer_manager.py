@@ -40,6 +40,20 @@ import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
 
+TRACE_PROBE_FILE = os.environ.get("TRACE_PROBE_FILE", "/telemetry/trace_probe.log")
+
+
+def _trace_probe(message: str) -> None:
+    if not message:
+        return
+    formatted = f"[{os.getpid()}] {message}\n"
+    try:
+        with open(TRACE_PROBE_FILE, "a", encoding="utf-8") as fp:
+            fp.write(formatted)
+    except Exception:
+        print(formatted.rstrip(), flush=True)
+
+
 from sglang.srt.aio_rwlock import RWLock
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import DisaggregationMode
@@ -163,6 +177,14 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         )
         self.crash_dump_folder = server_args.crash_dump_folder
         self.enable_trace = server_args.enable_trace
+        _trace_probe(
+            f"tokenizer_manager_init enable_trace={self.enable_trace} SGL_DEBUG={os.environ.get('SGL_DEBUG')}"
+        )
+        logger.info(
+            "[trace_debug] tokenizer_manager_init enable_trace=%s SGL_DEBUG=%s",
+            self.enable_trace,
+            os.environ.get("SGL_DEBUG"),
+        )
 
         # Read model args
         self.model_path = server_args.model_path
@@ -371,6 +393,34 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         created_time = time.time()
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
+
+        # Lightweight tracing diagnostics (enabled when SGL_DEBUG=1)
+        if os.environ.get("SGL_DEBUG") == "1":
+            try:
+                from sglang.srt.tracing import trace as _trace
+
+                pid = threading.get_native_id()
+                registered = pid in getattr(_trace, "threads_info", {})
+                global_enabled = getattr(_trace, "tracing_enabled", False)
+                _trace_probe(
+                    "tokenizer_generate diagnostics enable_trace="
+                    f"{self.enable_trace} tracing_enabled={global_enabled} "
+                    f"threads_total={len(getattr(_trace, 'threads_info', {}))} registered={registered} pid={pid}"
+                )
+                logger.info(
+                    "[trace_debug] tokenizer_generate enable_trace=%s tracing_enabled=%s thread_registered=%s pid=%s threads_total=%s",
+                    self.enable_trace,
+                    global_enabled,
+                    registered,
+                    pid,
+                    len(getattr(_trace, "threads_info", {})),
+                )
+                if self.enable_trace and not global_enabled:
+                    logger.warning(
+                        "[trace_debug] tokenizer_generate tracing requested but global switch disabled"
+                    )
+            except Exception as _exc:  # pragma: no cover
+                logger.info("[trace_debug] exception during diagnostics: %s", _exc)
 
         if self.server_args.tokenizer_worker_num > 1:
             # Modify rid, add worker_id

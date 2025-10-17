@@ -19,16 +19,49 @@ server). The harness uses OpenAI‑compatible Chat Completions exclusively.
 ## Helpers
 
 - `scripts/infer/start_server.sh`
-  - Starts `sglang.launch_server` inside the running container as `devuser`.
-  - Health checks `http://127.0.0.1:30000/get_model_info` until ready.
-  - Prints a small JSON status with `run_id`, `health`, `port`, `manifest_host_path`,
-    `log_file`, and `started_at_iso`.
+  - Starts `sglang.launch_server` inside the helper container.
+  - Probes `http://127.0.0.1:30000/get_model_info` until ready.
+  - On ready, prints one JSON line to stdout and writes the exact JSON atomically to
+    `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/logs/provider_sessions/<ISO>_<SESSION>/start.json`.
+
+- `scripts/infer/session_info.sh`
+  - Read‑only attach helper. Usage: `session_info.sh --manifest <ABS_MANIFEST_PATH>`.
+  - Prints the authoritative session start JSON (newest provider_sessions/*/start.json). No fallbacks.
 
 - `scripts/infer/status.sh`
   - Prints `ready|starting|down` based on the same health endpoint.
 
 - `scripts/infer/stop_server.sh`
-  - Stops the server process in the container and waits until the port is free.
+  - Stops the server process and waits until the port is free.
+
+## Server Ready JSON (start_server.sh)
+
+On readiness, the server launcher prints a single JSON line and writes the same JSON atomically to the session directory:
+
+```
+{
+  "schema_version": 1,
+  "run_id": "container-run-…",
+  "server_session_id": "srv-…",
+  "health": "ready",
+  "port": 30000,
+  "manifest_host_path": "/abs/path/to/manifest.json",
+  "log_file": "/telemetry/logs/…/observability.log",
+  "started_at_iso": "…Z",
+  "session_record_host_path": "/abs/path/to/logs/provider_sessions/<ISO>_<SESSION>/start.json",
+  "sizing": {
+    "tp_size": 1,
+    "mem_fraction_static": 0.94,
+    "chunked_prefill_size": 4096,
+    "context_length": 262144,
+    "max_prefill_tokens": 262144,
+    "max_total_tokens": 262144,
+    "max_mamba_cache_size": 1
+  }
+}
+```
+
+Attach flows must obtain this JSON via `scripts/infer/session_info.sh`.
 
 - `tools/infer_client.py`
   - One‑shot request runner (Chat Completions). Builds messages from

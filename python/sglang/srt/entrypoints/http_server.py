@@ -118,6 +118,20 @@ from sglang.srt.warmup import execute_warmups
 from sglang.utils import get_exception_traceback
 from sglang.version import __version__
 
+TRACE_PROBE_FILE = os.environ.get("TRACE_PROBE_FILE", "/telemetry/trace_probe.log")
+
+
+def _trace_probe(message: str) -> None:
+    if not message:
+        return
+    formatted = f"[{os.getpid()}] {message}\n"
+    try:
+        with open(TRACE_PROBE_FILE, "a", encoding="utf-8") as fp:
+            fp.write(formatted)
+    except Exception:
+        print(formatted.rstrip(), flush=True)
+
+
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -182,11 +196,57 @@ async def init_multi_tokenizer() -> ServerArgs:
         )
     )
 
+    _trace_probe(
+        f"init_multi_tokenizer enter enable_trace={server_args.enable_trace} SGL_DEBUG={os.environ.get('SGL_DEBUG')}"
+    )
+    logger.info(
+        "[trace_debug] http_worker_init enable_trace_flag=%s SGL_DEBUG=%s",
+        server_args.enable_trace,
+        os.environ.get("SGL_DEBUG"),
+    )
     if server_args.enable_trace:
-        process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
-        if server_args.disaggregation_mode == "null":
-            thread_label = f"MultiTokenizer-{tokenizer_manager.worker_id}"
-            trace_set_thread_info(thread_label)
+        _trace_probe(
+            f"init_multi_tokenizer calling process_tracing_init endpoint={server_args.oltp_traces_endpoint}"
+        )
+        if os.environ.get("SGL_DEBUG") == "1":
+            logger.info(
+                "[trace_debug] http_worker_init calling process_tracing_init endpoint=%s",
+                server_args.oltp_traces_endpoint,
+            )
+        try:
+            process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+            try:
+                import sglang.srt.tracing.trace as _trace  # type: ignore
+
+                _trace_probe(
+                    f"init_multi_tokenizer init_success tracing_enabled={getattr(_trace, 'tracing_enabled', None)} threads={len(getattr(_trace, 'threads_info', {}))}"
+                )
+            except Exception:
+                _trace_probe(
+                    "init_multi_tokenizer init_success (trace module unavailable)"
+                )
+        except Exception as exc:
+            _trace_probe(f"init_multi_tokenizer init_error {exc!r}")
+            raise
+        thread_label = f"MultiTokenizer-{tokenizer_manager.worker_id}"
+        trace_set_thread_info(thread_label)
+        _trace_probe(f"init_multi_tokenizer trace_set_thread_info label={thread_label}")
+        # Optional init diagnostics
+        if os.environ.get("SGL_DEBUG") == "1":
+            try:
+                import sglang.srt.tracing.trace as _trace
+
+                pid = threading.get_native_id()
+                registered = pid in getattr(_trace, "threads_info", {})
+                logger.info(
+                    "[trace_debug] http_worker_init enable_trace=%s tracing_enabled=%s thread_registered=%s pid=%s",
+                    server_args.enable_trace,
+                    getattr(_trace, "tracing_enabled", False),
+                    registered,
+                    pid,
+                )
+            except Exception as _exc:  # pragma: no cover
+                logger.info("[trace_debug] http_worker_init diag error: %s", _exc)
 
     return server_args
 
@@ -276,6 +336,19 @@ async def lifespan(fast_api_app: FastAPI):
     try:
         yield
     finally:
+        if server_args.enable_trace:
+            try:
+                from opentelemetry import trace as _otel_trace
+
+                provider = _otel_trace.get_tracer_provider()
+                shutdown = getattr(provider, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
+            except ImportError:
+                logger.debug("opentelemetry not installed; skipping tracer shutdown")
+            except Exception as exc:
+                logger.warning("Failed to shutdown tracer provider cleanly: %s", exc)
+
         if server_args.tokenizer_worker_num > 1:
             pid = os.getpid()
             logger.info(f"uvicorn worker {pid} ending...")
@@ -288,6 +361,28 @@ app = FastAPI(
     lifespan=lifespan,
     openapi_url=None if get_bool_env_var("DISABLE_OPENAPI_DOC") else "/openapi.json",
 )
+
+
+# Add a simple probe endpoint to help trace debugging in CI/staging.
+@app.get("/trace_probe")
+async def trace_probe_state():
+    try:
+        import sglang.srt.tracing.trace as _trace  # type: ignore
+
+        enabled = getattr(_trace, "tracing_enabled", None)
+        threads = len(getattr(_trace, "threads_info", {}))
+    except Exception:
+        enabled = None
+        threads = None
+    return {
+        "pid": os.getpid(),
+        "tracing_enabled": enabled,
+        "threads_registered": threads,
+        "SGL_DEBUG": os.environ.get("SGL_DEBUG"),
+        "TRACE_PROBE_FILE": TRACE_PROBE_FILE,
+    }
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1255,11 +1350,59 @@ def launch_server(
             server_args=server_args,
         )
 
+        _trace_probe(
+            f"http_single_init branch reached enable_trace={server_args.enable_trace} SGL_DEBUG={os.environ.get('SGL_DEBUG')}"
+        )
+        logger.info(
+            "[trace_debug] http_single_init enable_trace_flag=%s SGL_DEBUG=%s",
+            server_args.enable_trace,
+            os.environ.get("SGL_DEBUG"),
+        )
         if server_args.enable_trace:
-            process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+            _trace_probe(
+                f"http_single_init calling process_tracing_init endpoint={server_args.oltp_traces_endpoint}"
+            )
+            if os.environ.get("SGL_DEBUG") == "1":
+                logger.info(
+                    "[trace_debug] http_single_init calling process_tracing_init endpoint=%s",
+                    server_args.oltp_traces_endpoint,
+                )
+            try:
+                process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+                try:
+                    import sglang.srt.tracing.trace as _trace  # type: ignore
+
+                    _trace_probe(
+                        f"http_single_init init_success tracing_enabled={getattr(_trace, 'tracing_enabled', None)} threads={len(getattr(_trace, 'threads_info', {}))}"
+                    )
+                except Exception:
+                    _trace_probe(
+                        "http_single_init init_success (trace module unavailable)"
+                    )
+            except Exception as exc:
+                _trace_probe(f"http_single_init init_error {exc!r}")
+                raise
             if server_args.disaggregation_mode == "null":
                 thread_label = "Tokenizer"
                 trace_set_thread_info(thread_label)
+                _trace_probe(
+                    f"http_single_init trace_set_thread_info label={thread_label}"
+                )
+            if os.environ.get("SGL_DEBUG") == "1":
+                try:
+                    import sglang.srt.tracing.trace as _trace
+
+                    pid = threading.get_native_id()
+                    registered = pid in getattr(_trace, "threads_info", {})
+                    logger.info(
+                        "[trace_debug] http_single_init enable_trace=%s tracing_enabled=%s thread_registered=%s pid=%s",
+                        server_args.enable_trace,
+                        getattr(_trace, "tracing_enabled", False),
+                        registered,
+                        pid,
+                    )
+                except Exception as _exc:  # pragma: no cover
+                    logger.info("[trace_debug] http_single_init diag error: %s", _exc)
 
     set_global_state(
         _GlobalState(

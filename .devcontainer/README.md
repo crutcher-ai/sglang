@@ -1,9 +1,39 @@
 # Devcontainer + Observability Guide
 
-This guide documents the current, working container workflow for SGLang
-development on GH200, including the observability helper container, storage
-layout, editable installs, and how to run cache preparation. It reflects the
-repository state as of 2025‑10‑11.
+## Helper Scripts — Quick Reference (Authoritative Contracts)
+
+- `scripts/start_observable_container.sh`
+  - Starts the observability helper container and host‑side Jaeger v2; blocks until
+    the per‑run manifest is written and prints two lines:
+    - `CONTAINER_RUN_META_JSON_HOST=<absolute host path>`
+    - `CONTAINER_RUN_META_JSON=<container path>`
+  - Creates `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/manifest.json`.
+
+- `scripts/infer/start_server.sh`
+  - Launches the SGLang server inside the helper; on ready, prints one JSON line to stdout and writes the exact JSON
+    atomically to:
+    `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/logs/provider_sessions/<ISO>_<SESSION>/start.json`.
+  - OTEL resource attributes: `container_run=<RUN_ID>`, `service.instance.id=<SERVER_SESSION_ID>`.
+  - As of October 2025 the helper/engine always register the serving thread with the tracer in every server mode, so
+    `ENABLE_TRACE=1` guarantees `/generate` requests emit Jaeger spans (no more decoupled/disaggregation blind spot).
+
+- `scripts/infer/status.sh`
+  - Readiness probe for the server on `127.0.0.1:$PORT/get_model_info`; prints `ready|starting|down`.
+
+- `scripts/infer/stop_server.sh`
+  - Stops the server process; prints `stopped` when the port is free.
+
+- `scripts/infer/session_info.sh`
+  - Read‑only attach helper. Usage: `session_info.sh --manifest <ABS_MANIFEST_PATH>`.
+  - Prints the authoritative session `start.json` (newest provider_sessions/*/start.json) to stdout. No fallbacks.
+  - Exit codes: 0 success; 2 inconsistent/missing session JSON; 3 bad pointer/manifest; 4 runtime error.
+
+These contracts are the single source of truth used by external tools (e.g., SLICE‑Bench). Attach must go through
+`session_info.sh`; grepping logs or synthesizing metadata is unsupported.
+
+This guide documents the working container workflow for SGLang development on GH200, including the observability helper
+container, storage layout, and how to start/attach/stop the server and collect evidence. It reflects the repository state
+as of 2025‑10‑15.
 
 There are two viable flows:
 
@@ -20,8 +50,8 @@ There are two viable flows:
 
 | Component        | Listen Ports | Host Storage (relative)                       |
 |------------------|--------------|----------------------------------------------|
-| Prometheus       | 9090         | `.devcontainer/storage/prometheus/<run>/`     |
-| Jaeger UI/OTLP   | 16686 / 4317 / 4318 | `$HOME/sglang-observability/jaeger-v2/{keys,values}` |
+| Prometheus       | 9090         | `$HOME/sglang-observability/telemetry/container_runs/<RUN>/prometheus/` |
+| Jaeger UI/OTLP   | 16686 / 4317 / 4318 | `$HOME/sglang-observability/telemetry/container_runs/<RUN>/jaeger/badger/{keys,values}` |
 | node_exporter    | 9100         | n/a (metrics only)                            |
 | dcgm-exporter    | 9400         | n/a (metrics only)                            |
 | SGLang server    | 30000 (router 29000) | user-launched; logs under `$HOME/sglang-observability/telemetry/logs/` |
@@ -32,12 +62,13 @@ When you run `./scripts/start_observable_container.sh`, Docker launches the
 `sglang-dev` container and invokes `/opt/observability/init-run.sh` inside it.
 The init script:
 
-1. Generates a run identifier `container-run-<timestamp>-<id>`.
-2. Writes `/telemetry/container_run_meta.env` containing only pointers to the
-   manifest (`CONTAINER_RUN_META_JSON` and, when available, `CONTAINER_RUN_META_JSON_HOST`).
+1. Generates a run identifier `container-run-<timestamp>-<id>` and creates the per‑run directories under
+   `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/`.
+2. Writes `/telemetry/container_run_meta.env` and host pointer containing only pointers to the JSON manifest
+   (`CONTAINER_RUN_META_JSON` and `CONTAINER_RUN_META_JSON_HOST`).
 3. Creates a per-run log file in `/telemetry/logs/` and tees all stdout/stderr
    into it.
-4. Launches Prometheus, Jaeger, node_exporter, dcgm-exporter, and `nv-hostengine`.
+4. Launches Prometheus, host‑side Jaeger v2, node_exporter, dcgm-exporter, and `nv-hostengine`.
 5. Prints the manifest locations to stdout for consumers.
 6. Exports `PYTHONPATH=/workspaces/sglang/python` and executes an init hook as
    `devuser` when `INIT_RUN_HOOK` is provided. The start script passes
@@ -45,8 +76,7 @@ The init script:
 7. Runs the container payload (`sleep infinity`) as `devuser`, keeping it ready
    for interactive work.
 
-The init hook installs SGLang from the bind‑mounted workspace in editable mode
-so imports resolve to your live code:
+The init hook can install SGLang from the bind‑mounted workspace in editable mode so imports resolve to your live code:
 
 ```
 pip install -U pip setuptools wheel
@@ -70,11 +100,15 @@ $HOME/sglang-observability/
     .locks/
     .in_progress/
   telemetry/
-    logs/                # one container-lifetime log per run
-    container_run_meta.env  # pointer to latest manifest (touch/remove managed by init-run)
-    container_runs/      # JSON manifest per run (written by init-run.sh)
-    prometheus/          # per-run TSDB directories
-  jaeger-v2/             # global Badger storage used by host-side Jaeger (keys/, values/)
+    logs/                    # helper + server logs under active container run
+    container_run_meta.env   # pointer to the active manifest
+    container_runs/
+      <RUN_ID>/
+        manifest.json        # authoritative per‑run manifest
+        logs/
+          providers_sessions/<ISO>_<SESSION>/start.json  # authoritative session metadata (written atomically)
+        prometheus/          # Prometheus TSDB for this run
+        jaeger/badger/{keys,values}/  # Jaeger v2 storage for this run
 ```
 
 Prometheus and Jaeger write to subdirectories named after `CONTAINER_RUN_ID`,
@@ -83,21 +117,20 @@ allowing historical runs to be inspected later.
 ## Lifecycle Scripts (Host)
 
 - `scripts/start_observable_container.sh`
-  - Launches (or replaces) the `sglang-dev` container.
+  - Launches (or replaces) the `sglang-dev` container and starts host‑side Jaeger v2.
   - Blocks until `/telemetry/container_run_meta.env` points at a manifest JSON
     and prints:
     - `CONTAINER_RUN_META_JSON_HOST=<absolute host path>`
     - `CONTAINER_RUN_META_JSON=<container path>`
-  - Emits heartbeat lines (`Container starting...`) every ~5 seconds while the
-    container comes up.
+  - Emits heartbeat lines (`Container starting...`) while the container comes up.
   - Runs the container in host-network mode so ports (30000 for SGLang, 29000 for router,
     9090/9400/9100/16686/4317/4318) are immediately reachable from the host.
   - Truncates the env pointer before launch so stale run IDs cannot leak
     through.
   - Prints absolute host and container manifest paths when ready.
   - If the manifest contains warnings, they are printed before the “ready” line.
-  - Exits non-zero if Docker reports the container stopped or failed; the tail of
-    the container log (last 50 lines) is written to stderr for debugging.
+  - Exits non‑zero if Docker reports the container stopped or failed; the tail of the container log (last 50 lines) is
+    written to stderr for debugging.
   - `--help` prints usage; no other CLI flags are accepted. Set `HOST_MANIFEST_ROOT`
     in the environment to override the default host manifest directory
     (`.devcontainer/storage/container_runs`).
@@ -136,7 +169,7 @@ mount locations:
 }
 ```
 
-SLICE‑Bench (and other tooling) should always prefer `paths.host.*` when slicing logs or wiring Prometheus/Jaeger exports.
+Tools should always prefer `paths.host.*` for logs and storage when running on the host.
 
 `/telemetry/container_run_meta.env` (host: `$HOME/sglang-observability/telemetry/container_run_meta.env`)
 contains the manifest pointers:
@@ -166,37 +199,20 @@ container path otherwise.
 - `warnings` retains the authoritative list of degradations; your automation
   should continue to gate on an empty list unless a test requires otherwise.
 
-## Launching SGLang (from Host)
+## Launching / Attaching / Stopping the Server (Host)
 
-Because the init script already captures stdout/stderr, launch SGLang after
-reading the manifest pointer at `.devcontainer/storage/container_run_meta.env`:
+1) Start helper and capture manifest pointers:
+   `./scripts/start_observable_container.sh`
 
-```bash
-# On the host
-RUN_META=$HOME/sglang-observability/telemetry/container_run_meta.env
+2) Start the server (prints ready JSON to stdout, writes session start.json atomically):
+   `./scripts/infer/start_server.sh`
 
-# Prefer absolute host path when provided, fall back to the container path.
-MANIFEST_PATH=$(awk -F= '/CONTAINER_RUN_META_JSON_HOST/{print $2}' "$RUN_META")
-if [ -z "$MANIFEST_PATH" ]; then
-  MANIFEST_PATH=$(awk -F= '/CONTAINER_RUN_META_JSON=/{print $2}' "$RUN_META")
-fi
+3) Attach to an existing session (read‑only):
+   `./scripts/infer/session_info.sh --manifest <ABS_MANIFEST_PATH>`
 
-LOG_FILE=$(jq -r '.storage.log_file' "$MANIFEST_PATH")
-
-docker exec -d -u devuser sglang-dev bash -lc "
-  python -m sglang.launch_server \\
-    --model-path /models/Qwen/Qwen3-Next-80B-A3B-Thinking-FP8 \\
-    --context-length 32768 \\
-    --max-running-requests 1 \\
-    --max-total-tokens 32768 \\
-    --host 0.0.0.0 --port 30000 \\
-    --enable-metrics \\
-    --tp-size 1 \\
-    --trust-remote-code >> '$LOG_FILE' 2>&1 &"
-```
-
-Each container lifetime emits a fresh log file in `.devcontainer/storage/logs/`
-even across `docker stop` / `docker compose down`.
+4) Probe readiness / stop:
+   - `./scripts/infer/status.sh` → `ready|starting|down`
+   - `./scripts/infer/stop_server.sh` → `stopped`
 
 ## Warning Taxonomy
 
@@ -234,10 +250,10 @@ and `telemetry_surfaces.*.status` will reflect `failed`.
 ## Typical Workflow (Host)
 
 1. `./scripts/start_observable_container.sh`
-2. Capture `CONTAINER_RUN_META_JSON_HOST=` from stdout and load the manifest.
-3. Launch the SGLang server (and Slice-Bench workload) using paths from the
-   manifest.
-4. After workloads finish, call `./scripts/stop_observable_container.sh`.
+2. Capture `CONTAINER_RUN_META_JSON_HOST=` and load the manifest.
+3. `./scripts/infer/start_server.sh` (or attach via `session_info.sh` if already running).
+4. Run workloads and collect telemetry.
+5. `./scripts/infer/stop_server.sh` and `./scripts/stop_observable_container.sh` when finished.
 5. Inspect logs / metrics / traces under `.devcontainer/storage/*` as needed.
 
 ## Editable Install & PYTHONPATH

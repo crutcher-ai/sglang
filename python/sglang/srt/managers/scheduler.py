@@ -2888,6 +2888,13 @@ def run_scheduler_process(
 
     # Set up tracing
     if server_args.enable_trace:
+        if os.environ.get("SGL_DEBUG") == "1":
+            logger.info(
+                "[trace_debug] scheduler_init calling process_tracing_init endpoint=%s tp_rank=%s dp_rank=%s",
+                server_args.oltp_traces_endpoint,
+                tp_rank,
+                dp_rank,
+            )
         process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
         if server_args.disaggregation_mode == "null":
             thread_label = "Scheduler"

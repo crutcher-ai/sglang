@@ -148,8 +148,8 @@ ensure_dcgm_capability() {
 
 
 # Emit container_started event (best-effort)
-bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event container_started run_id="${container_run_id}" || true
-trap 'bash /workspaces/sglang/.devcontainer/observability/eventlog.sh event container_stopped run_id="'"${container_run_id}"'" || true' EXIT
+bash /sgl-workspace/sglang/.devcontainer/observability/eventlog.sh event container_started run_id="${container_run_id}" || true
+trap 'bash /sgl-workspace/sglang/.devcontainer/observability/eventlog.sh event container_stopped run_id="'"${container_run_id}"'" || true' EXIT
 
 eval "${PROMETHEUS_EXTRA_ENV:-true}" >/dev/null 2>&1 || true
 
@@ -217,7 +217,7 @@ print(json.dumps(warnings))
 PY
 )
 
-git_revision=$(git -C /workspaces/sglang rev-parse HEAD 2>/dev/null || echo "unknown")
+git_revision=$(git -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null || echo "unknown")
 container_image="${CONTAINER_IMAGE:-unknown}"
 start_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -309,10 +309,32 @@ fi
 
 echo "Background services started: Prometheus, node_exporter, dcgm-exporter (Jaeger v2 runs on host ports)"
 
-export PYTHONPATH="/workspaces/sglang/python${PYTHONPATH:+:${PYTHONPATH}}"
-
 if [ -n "${INIT_RUN_HOOK:-}" ]; then
-  as_devuser bash -lc "${INIT_RUN_HOOK}"
+  if ! as_devuser bash -lc "${INIT_RUN_HOOK}"; then
+    echo "ERROR: init hook failed: ${INIT_RUN_HOOK}" >&2
+    exit 1
+  fi
+fi
+
+# Guard against silent fallbacks: import via repo venv interpreter
+if ! as_devuser /sgl-workspace/sglang/.venv/bin/python - <<'PY'
+import importlib
+importlib.import_module("sglang")
+PY
+then
+  echo "ERROR: sglang import validation failed via .venv; editable install missing" >&2
+  exit 1
+fi
+
+HTTP_SERVER_FILE="/sgl-workspace/sglang/python/sglang/srt/entrypoints/http_server.py"
+if ! as_devuser grep -q '/trace_probe' "$HTTP_SERVER_FILE"; then
+  echo "ERROR: FastAPI app verification failed; /trace_probe route missing" >&2
+  exit 1
+fi
+
+if [ -n "${RUN_ROOT:-}" ] && [ ! -f "${RUN_ROOT}/.init_ok" ]; then
+  echo "ERROR: init hook success marker not found at ${RUN_ROOT}/.init_ok" >&2
+  exit 1
 fi
 
 # Ensure hostengine is stopped when container exits and clear pointer
