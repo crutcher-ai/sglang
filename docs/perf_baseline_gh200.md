@@ -186,3 +186,94 @@ python3 scripts/bench/analyze_window.py <bench_dir> --out <bench_dir>/tokens_rep
 
 - Very high `MAX_MAMBA_CACHE_SIZE` can fail at startup even with low context if the profiler computes a negative token budget. Reduce `MAX_MAMBA_CACHE_SIZE` or context a notch; or temporarily increase `mem_fraction_static` during admission testing.
 - cuda‑graph capture can transiently lift HBM; use a short window warmup before critical measurements.
+
+## Prefill‑Heavy + Mixed Workloads (New Findings)
+
+This section captures everything we learned while extending the baseline beyond the original decode‑heavy experiments.
+
+### Additions at a glance
+
+- Prefill‑heavy windows: larger prefill chunks at C=16 markedly improve throughput.
+- Mixed windows (prefill ~15.9k + decode ~256): aggregate TPS is dominated by prefill; overlap/“aggressiveness” knobs have minimal impact at this mix.
+- Chunk sweeps: documented wall TPS and stage TPS vs. chunk size.
+- Admission/warmup guidance for very large contexts (64k/128k/256k).
+- Runner ergonomics: multi‑payload mixes via `BENCH_PAYLOAD_PATHS` and `http_bench.py --bodies`.
+
+### Prefill‑only (C=16, ctx=16k): chunked prefill sweep
+
+- Setup: LongBench v2 context (~15,875 tokens; Qwen tokenizer). Caps: ctx=16k; `MAX_*_TOKENS=16k`; KV fp8; Mamba SSM bf16.
+- Prefill wall TPS (single windows):
+  - chunk 2k → ≈ 14,327
+  - chunk 8k → ≈ 23,482
+  - chunk 12k → ≈ 25,047
+  - chunk 16k → ≈ 32,830
+- Stage TPS rises with chunk size; larger chunks reduce scheduler/launch overhead.
+- With ctx raised to 32k for the same 16k prompt (chunk 16k), throughput stayed similar/slightly higher (~33,321). Compute is driven by actual tokens and chunk shape; the cap mainly affects admission.
+
+### Mixed (50/50 requests: prefill ~15.9k; decode ~256), ctx=16k
+
+- Aggregate wall TPS ≈ 11.9–12.1k across C=64..128; decode contributes ~196–198 TPS.
+- Marginal gains with concurrency are <5%; practical knee ~96–112 under a p95 e2e SLO.
+- Overlap (`--enable-two-batch-overlap`) and `--schedule-conservativeness ∈ {0.1,0.6,0.9}` did not move aggregate TPS at this mix.
+- Tiny chunks (1k) halve aggregate TPS (~6.3–6.5k) and lengthen windows.
+
+#### Additional observations (offline vs. online; practical knobs)
+
+- “Prefill” in our metrics is input tokens (delta of `sglang:prompt_tokens_total`).
+- Offline harnesses differ from the online window in scheduling and runtime overhead:
+  - `bench_offline_throughput --backend runtime` re-tokenizes prompts and may apply chat defaults; this can inflate token counts and trigger context guardrails if inputs are too close to the cap. Use datasets that explicitly control length (e.g., generated-shared-prefix) or add a margin below the cap.
+  - To mimic the online mixed window offline, set `--chunked-prefill-size 16384`, `--max-running-requests 96`, and use long-prefix datasets; expect decode rates (e.g., ~170 tok/s internal) to align in ballpark with online stage decode TPS, while aggregate prefill tok/s may differ due to the different loops.
+- Sizing: set `MAX_MAMBA_CACHE_SIZE` near your target concurrency (e.g., 96 for C≈96) to avoid wasting memory.
+- Readiness gates: enable tracing and `HELLO_AFTER_READY=1` (or a stricter `VERIFY_INFERENCE` if adopted) to ensure first-inference succeeds post‑startup.
+
+### Big prompts (assets + procedure)
+
+Payloads (raw context, Qwen tokenizer) live under `benchmarks-local/prompts/lb2_qwen3next` with a `manifest.json` detailing ids and token counts:
+
+- 32k (31,754): `lb2_qwen3next_32k_66ee8bab....json`
+- 64k (64,605): `lb2_qwen3next_64k_671b170c....json`
+- 128k (130,055): `lb2_qwen3next_128k_66f568dc....json`
+- 256k (255,047): `lb2_qwen3next_256k_66f2b546....json`
+
+Recommended runs (prefill‑only, C=16, one pass each):
+
+- For each target N ∈ {64k, 128k, 256k}:
+  - Set `CONTEXT_LENGTH=MAX_*_TOKENS=N` and `CHUNKED_PREFILL_SIZE=N` (full‑chunk prefill).
+  - If startup OOMs during CUDA graph capture/deep_gemm warmups, first lower `mem_fraction_static` (e.g., 0.98→0.94/0.92), and/or add `--cuda-graph-max-bs` (e.g., 16/8). If still failing, reduce `MAX_MAMBA_CACHE_SIZE` (160→96→64).
+  - Run a single window with `TOTAL=16`.
+  - Analyze with `scripts/bench/analyze_window.py` and record `tps_wall.prefill`, `tps_stage.prefill`, and `window_seconds`.
+
+These headroom tweaks are admission‑only; they do not change steady‑state per‑token slope.
+
+### Runner enhancements (multi‑payload and BENCH_ROOT‑only)
+
+- `scripts/bench/http_bench.py` supports `--bodies path1,path2,...` (round‑robin) for mixed workloads.
+- `scripts/bench/run_window_bench.sh`:
+  - `BENCH_PAYLOAD_PATHS` (comma‑separated) and `BENCH_PAYLOAD_PATH` (single) select payloads.
+  - `BENCH_ROOT` lets you run fully in‑container without a manifest (writes directly to the provided path).
+
+### Practical guidance (updated)
+
+- Prefill‑heavy at fixed C (e.g., 16): use the largest `chunked_prefill_size` admission allows; for single long prompts, full‑chunk prefill yields the best efficiency.
+- Mixed at 16k: if you want overlap/aggressiveness to matter, increase decode’s share (more tokens or higher mix weight). Otherwise prefill dominates and concurrency looks flat.
+- Keep bench artifacts organized via `BENCH_ROOT`; collect `sglang_before/after.prom`, `samples.csv`, `http_summary.json`, `tokens_report.json` per window.
+
+## Code changes to the bench harness (context for upstreaming)
+
+We made small, targeted improvements for repeatability and multi‑payload mixes:
+
+- `scripts/bench/run_window_bench.sh`
+  - Added `BENCH_PAYLOAD_PATH` (single) and `BENCH_PAYLOAD_PATHS` (comma‑separated) to select request bodies and copy them into the bench directory.
+  - Added `BENCH_ROOT` to write benchmarks directly under a provided path, bypassing manifest resolution (useful inside the helper container).
+  - CSV numeric extraction fix for DCGM/node metrics: pipe metric lines through `awk '{print $NF}'` to guarantee numeric fields in `samples.csv`.
+
+- `scripts/bench/http_bench.py`
+  - Added mutually exclusive `--body` (single) and `--bodies` (multi) flags; in multi mode, requests round‑robin the bodies list.
+  - Added `--outdir` (explicit), writes `meta_*.txt`, `out_*.json`, and a compact `http_summary.json` with `window_seconds`.
+  - Tightened aiohttp client behavior (timeouts, larger read buffer) for high‑concurrency windows.
+
+Upstream suitability:
+
+- The `http_bench.py --bodies` support and `--outdir` improvements are broadly useful and low‑risk to upstream as a focused PR.
+- The CSV numeric fix in the runner and the BENCH_ROOT/payload‑copy ergonomics are specific to this repo’s helper workflow but can be proposed as optional quality‑of‑life improvements.
+- A follow‑up improvement we’d propose upstream: in `bench_offline_throughput`, treat non‑JSON error responses as failures in aggregation instead of raising, and offer an explicit length guard for runtime backend to prevent context‑overflow requests.

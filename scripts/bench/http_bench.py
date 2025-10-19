@@ -27,7 +27,12 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=30000)
     ap.add_argument("--path", default="/generate")
-    ap.add_argument("--body", required=True)
+    grp = ap.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--body")
+    grp.add_argument(
+        "--bodies",
+        help="Comma-separated list of JSON payload files. Round-robin is used.",
+    )
     ap.add_argument("--total", type=int, default=80)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--timeout", type=float, default=120.0)
@@ -35,12 +40,19 @@ def main():
     args = ap.parse_args()
 
     url = f"http://{args.host}:{args.port}{args.path}"
-    body = open(args.body, "rb").read()
+    if args.bodies:
+        body_paths = [p.strip() for p in args.bodies.split(",") if p.strip()]
+        if not body_paths:
+            print("--bodies provided but empty after parsing", file=sys.stderr)
+            return 2
+        bodies = [open(p, "rb").read() for p in body_paths]
+    else:
+        bodies = [open(args.body, "rb").read()]
     t_start = time.time()
     results = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futs = {
-            ex.submit(post_json, url, body, args.timeout): i
+            ex.submit(post_json, url, bodies[(i - 1) % len(bodies)], args.timeout): i
             for i in range(1, args.total + 1)
         }
         for fut in as_completed(futs):
