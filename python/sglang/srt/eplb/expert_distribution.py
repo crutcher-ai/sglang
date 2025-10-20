@@ -30,6 +30,8 @@ import torch.distributed
 
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.trace import ExpertTraceWriter
+from sglang.srt.trace.expert_trace import get_expert_trace_writer
 from sglang.srt.utils import Withable, get_bool_env_var, is_npu
 
 _is_npu = is_npu()
@@ -144,6 +146,10 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
             for k in self._accumulator.get_single_pass_gatherer_keys()
         }
 
+        self._expert_trace_writer: Optional[ExpertTraceWriter] = (
+            get_expert_trace_writer()
+        )
+
         if server_args.enable_expert_distribution_metrics:
             logger.info(
                 "ExpertDistributionRecorder auto start record since enable_expert_distribution_metrics"
@@ -177,17 +183,31 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
 
     def _on_forward_pass_start(self, forward_batch: ForwardBatch):
         if not self._recording:
+            if self._expert_trace_writer:
+                step_id = self._current_forward_pass_id.value
+                if step_id is not None:
+                    self._expert_trace_writer.on_forward_pass_start(
+                        step_id, forward_batch
+                    )
             return
         for gatherer_key, gatherer in self._single_pass_gatherers.items():
             gatherer.reset()
             gatherer.on_forward_pass_start(forward_batch)
+        if self._expert_trace_writer:
+            step_id = self._current_forward_pass_id.value
+            if step_id is not None:
+                self._expert_trace_writer.on_forward_pass_start(step_id, forward_batch)
 
     def _on_forward_pass_end(self, forward_pass_id: int):
         if not self._recording:
+            if self._expert_trace_writer:
+                self._expert_trace_writer.on_forward_pass_end(forward_pass_id)
             return
         for gatherer_key, gatherer in self._single_pass_gatherers.items():
             single_pass_data = gatherer.collect()
             self._accumulator.append(forward_pass_id, gatherer_key, single_pass_data)
+        if self._expert_trace_writer:
+            self._expert_trace_writer.on_forward_pass_end(forward_pass_id)
 
     def on_select_experts(self, topk_ids: torch.Tensor):
         self._on_hook("on_select_experts", topk_ids=topk_ids)
@@ -218,16 +238,32 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
     def _on_hook(self, hook_name: str, **kwargs):
         if self._disable_all:
             return
-        if not (
+
+        should_run_gatherer = (
             self._recording or torch.get_device_module().is_current_stream_capturing()
-        ):
-            return
-        gatherer = self._single_pass_gatherers[
-            self._accumulator.get_single_pass_gatherer_key(
-                self._current_debug_name.value
+        )
+
+        if should_run_gatherer:
+            gatherer = self._single_pass_gatherers[
+                self._accumulator.get_single_pass_gatherer_key(
+                    self._current_debug_name.value
+                )
+            ]
+            getattr(gatherer, hook_name)(
+                layer_idx=self._current_layer_idx.value, **kwargs
             )
-        ]
-        getattr(gatherer, hook_name)(layer_idx=self._current_layer_idx.value, **kwargs)
+
+        if (
+            self._expert_trace_writer
+            and hook_name == "on_select_experts"
+            and "topk_ids" in kwargs
+        ):
+            step_id = self._current_forward_pass_id.value
+            layer_idx = self._current_layer_idx.value
+            if step_id is not None and layer_idx is not None:
+                self._expert_trace_writer.handle_on_select_experts(
+                    step_id, layer_idx, kwargs["topk_ids"]
+                )
 
     def _reset(self):
         """Reset the expert distribution recorder."""
@@ -238,6 +274,8 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
         for gatherer in self._single_pass_gatherers.values():
             gatherer.reset()
         self._accumulator.reset()
+        if self._expert_trace_writer:
+            self._expert_trace_writer.reset()
 
     def start_record(self):
         """Start recording the expert distribution."""
@@ -247,6 +285,8 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
             )
         self._reset()
         self._recording = True
+        if self._expert_trace_writer:
+            self._expert_trace_writer.start_record()
 
     def stop_record(self):
         """Stop recording the expert distribution."""
@@ -255,11 +295,21 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
                 "SGLang server has not been recording expert ids. Did you forget to start recording by sending request to the `/start_expert_distribution_record` endpoint?"
             )
         self._recording = False
+        if self._expert_trace_writer:
+            self._expert_trace_writer.stop_record()
 
     def dump_record(self, output_mode: _OutputMode = "file"):
         """Dump the expert distribution record and reset the recorder after dumping."""
         output = self._accumulator.dump(output_mode=output_mode)
+        trace_files: List[str] = []
+        if self._expert_trace_writer:
+            trace_files = self._expert_trace_writer.flush(reason="dump_record")
         self._reset()
+        if output_mode == "file" and trace_files:
+            # include trace paths for caller visibility
+            output = output or {}
+            output.setdefault("metadata", {})
+            output["metadata"]["expert_trace_files"] = trace_files
         return output
 
     @property
@@ -349,8 +399,9 @@ class _SinglePassGatherer(ABC):
 
 
 class _DetailSinglePassGatherer(_SinglePassGatherer):
-    # DeepSeek V3 has this value; should generalize later
-    _TOP_K_NUM = 8
+    # Default top-k experts recorded per token. Qwen3‑Next uses 10.
+    # TODO: generalize to derive from model config or router at runtime.
+    _TOP_K_NUM = 10
 
     def __init__(
         self,

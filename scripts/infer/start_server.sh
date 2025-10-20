@@ -349,6 +349,10 @@ docker exec -u devuser \
   -e OTLP="$OTLP" \
   -e OTEL_TRACES_SAMPLER="$OTEL_TRACES_SAMPLER" \
   -e SGL_DEBUG="$SGL_DEBUG" \
+  -e SGLANG_MOE_TRACE_DIR="$SGLANG_MOE_TRACE_DIR" \
+  -e SGLANG_MOE_TRACE_PHASE="$SGLANG_MOE_TRACE_PHASE" \
+  -e SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC="$SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC" \
+  -e EXPERT_DISTRIBUTION_RECORDER_MODE="$EXPERT_DISTRIBUTION_RECORDER_MODE" \
   -e OTEL_RESOURCE_ATTRIBUTES="$OTEL_ATTRS" \
   -e SGL_CONTAINER_RUN_ID="$RUN_ID" \
   -e SGL_SERVER_SESSION_ID="$SERVER_SESSION_ID" \
@@ -362,6 +366,7 @@ docker exec -u devuser \
   -e PYTHON_BIN="$PYTHON_BIN" \
   "$CONTAINER_NAME" bash -lc "\
   bash /sgl-workspace/sglang/.devcontainer/observability/eventlog.sh event sglang_started run_id=\"$RUN_ID\" server_session_id=\"$SERVER_SESSION_ID\" model_slug=\"$MODEL_SLUG\" tp=\"$TP_SIZE\" kv_cache_dtype=\"$KV\" || true; \
+  echo '[trace_debug] SGLANG_MOE_TRACE_DIR='\"$SGLANG_MOE_TRACE_DIR\"' SGLANG_MOE_TRACE_PHASE='\"$SGLANG_MOE_TRACE_PHASE\"' SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC='\"$SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC\" >> \"$LOG_FILE\"; \
   PY_BIN=\"${PYTHON_BIN}\"; \
   nohup \"\$PY_BIN\" -m sglang.launch_server \\
     --model-path \"\$MODEL\" \\
@@ -377,6 +382,7 @@ docker exec -u devuser \
     \${TRACE:+--enable-trace} \\
     \${OTLP:+--oltp-traces-endpoint \"\$OTLP\"} \\
     --enable-metrics --trust-remote-code \\
+    \${EXPERT_DISTRIBUTION_RECORDER_MODE:+--expert-distribution-recorder-mode \"$EXPERT_DISTRIBUTION_RECORDER_MODE\"} \\
     \${SGLANG_EXTRA_ARGS:+$SGLANG_EXTRA_ARGS} \\
     >> \"\$LOG_FILE\" 2>&1 & disown" >/dev/null
 

@@ -252,7 +252,11 @@ class TopK(CustomOp):
         num_token_non_padded: Optional[torch.Tensor] = None,
         expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
     ) -> TopKOutput:
-        if self.topk_config.output_format is not None:
+        # Allow forcing STANDARD output format to guarantee on_select_experts hooks fire
+        force_standard = get_bool_env_var("SGLANG_FORCE_STANDARD_TOPK")
+        if force_standard:
+            output_format = TopKOutputFormat.STANDARD
+        elif self.topk_config.output_format is not None:
             output_format = self.topk_config.output_format
         elif get_moe_runner_backend().is_triton_kernel():
             output_format = TopKOutputFormat.TRITON_KERNEL

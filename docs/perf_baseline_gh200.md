@@ -162,6 +162,33 @@ Analyze:
 python3 scripts/bench/analyze_window.py <bench_dir> --out <bench_dir>/tokens_report.json
 ```
 
+### MoE Expert Trace (per‑token) quick start
+
+Enable recorder + JSONL writer at launch. Files are written to `/telemetry/expert-trace` in the helper and mapped to the host under `$HOME/sglang-observability/telemetry/expert-trace`.
+
+```
+EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
+SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
+SGLANG_MOE_TRACE_PHASE=decode \
+SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
+ENABLE_TRACE=1 OTEL_TRACES_SAMPLER=always_on \
+MEM_FRACTION_STATIC=0.98 CONTEXT_LENGTH=16384 MAX_TOTAL_TOKENS=16384 MAX_PREFILL_TOKENS=16384 \
+MAX_MAMBA_CACHE_SIZE=160 READY_TIMEOUT=600 \
+./scripts/infer/start_server.sh
+
+# Drive a short decode, then flush and list
+curl -sf -X POST http://127.0.0.1:30000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"local","messages":[{"role":"user","content":"List three prime numbers."}],"temperature":0.2,"max_tokens":8}' >/dev/null
+curl -sf http://127.0.0.1:30000/dump_expert_distribution_record >/dev/null
+ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1
+```
+
+Troubleshooting (empty JSONL):
+
+- Force STANDARD top‑k hooks: `SGLANG_FORCE_STANDARD_TOPK=1` and `SGLANG_EXTRA_ARGS="--moe-runner-backend triton"`.
+- Ensure `/telemetry/expert-trace` is writable by the `devuser` inside the container.
+
 ### HBM min/mean/max during windows
 
 `<bench_dir>/samples.csv` has `fb_used_MiB` for quick min/mean/max (now always numeric).

@@ -23,6 +23,12 @@ server). The harness uses OpenAI‑compatible Chat Completions exclusively.
   - Probes `http://127.0.0.1:30000/get_model_info` until ready.
   - On ready, prints one JSON line to stdout and writes the exact JSON atomically to
     `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/logs/provider_sessions/<ISO>_<SESSION>/start.json`.
+  - Recorder + Expert Trace (MoE) envs forwarded to the model process:
+    - `EXPERT_DISTRIBUTION_RECORDER_MODE` → `--expert-distribution-recorder-mode <per_token|stat|per_pass|stat_approx>`
+    - `SGLANG_MOE_TRACE_DIR` (enables JSONL writer when set)
+    - `SGLANG_MOE_TRACE_PHASE` (`decode|prefill|both|all`)
+    - `SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC` (seconds)
+    - Diagnostic: `SGLANG_FORCE_STANDARD_TOPK=1` forces STANDARD top‑k routing path (ensures per‑token on_select_experts hooks fire even when TRITON_KERNEL/BYPASSED fast paths are available).
 
 - `scripts/infer/session_info.sh`
   - Read‑only attach helper. Usage: `session_info.sh --manifest <ABS_MANIFEST_PATH>`.
@@ -74,6 +80,51 @@ python3 scripts/bench/analyze_window.py <bench_dir> --out <bench_dir>/tokens_rep
 Very large contexts (64k/128k/256k): admission and capture tuning
 
 - Add `--cuda-graph-max-bs` via `SGLANG_EXTRA_ARGS` (e.g., 16 for 64k/128k, 8 for 256k) and lower `MEM_FRACTION_STATIC` slightly (e.g., 0.94/0.92) to clear CUDA graph warmups without changing steady-state slope. If admission still fails, reduce `MAX_MAMBA_CACHE_SIZE` in small steps (160→96→64) before shrinking chunk size.
+
+### Quick MoE Trace (per‑token) example
+
+Start the server with a real recorder and the ExpertTraceWriter enabled. The trace directory lives inside the helper at `/telemetry/expert-trace` and maps to the host path `$HOME/sglang-observability/telemetry/expert-trace`.
+
+```
+EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
+SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
+SGLANG_MOE_TRACE_PHASE=decode \
+SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
+ENABLE_TRACE=1 OTEL_TRACES_SAMPLER=always_on \
+MEM_FRACTION_STATIC=0.98 CONTEXT_LENGTH=16384 MAX_TOTAL_TOKENS=16384 MAX_PREFILL_TOKENS=16384 \
+MAX_MAMBA_CACHE_SIZE=160 READY_TIMEOUT=600 \
+./scripts/infer/start_server.sh
+```
+
+Drive a small decode (completion tokens > 0) and flush:
+
+```
+curl -sf -X POST http://127.0.0.1:30000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"local","messages":[{"role":"user","content":"List three prime numbers."}],"temperature":0.2,"max_tokens":8}' >/dev/null
+curl -sf http://127.0.0.1:30000/dump_expert_distribution_record >/dev/null
+```
+
+List and inspect JSONL on the host:
+
+```
+ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1
+head -n 2 $(ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1)
+```
+
+Analyzer (already in-tree):
+
+```
+python3 tools/analyze_expert_trace.py --dir $HOME/sglang-observability/telemetry/expert-trace --top 10
+```
+
+If the JSONL is empty (0‑byte), force the STANDARD top‑k path to ensure hooks fire:
+
+```
+SGLANG_FORCE_STANDARD_TOPK=1 SGLANG_EXTRA_ARGS="--moe-runner-backend triton" \
+EXPERT_DISTRIBUTION_RECORDER_MODE=per_token SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
+./scripts/infer/start_server.sh
+```
 
 ## Server Ready JSON (start_server.sh)
 

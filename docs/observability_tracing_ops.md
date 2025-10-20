@@ -117,3 +117,39 @@ provider.shutdown()
 - Upstream SGLang flags only: `--enable-trace` and `--oltp-traces-endpoint <host:port>`.
 - Jaeger v3 responses are OTLP JSON envelopes (`result.resourceSpans[...]`); the legacy `data[]` payload is gone by design.
 - Tracing resource attributes: `container_run=<RUN_ID>`, `service.instance.id=<SERVER_SESSION_ID>`.
+
+## Expert Trace (MoE)
+
+The ExpertTraceWriter captures per‑step MoE top‑k selections per layer as JSONL for offline analysis.
+
+Enable at launch (envs are forwarded by `start_server.sh` into the model process):
+
+```
+EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
+SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
+SGLANG_MOE_TRACE_PHASE=decode \
+SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
+./scripts/infer/start_server.sh
+```
+
+- Files land under host: `$HOME/sglang-observability/telemetry/expert-trace/`
+- Optional diagnostics:
+  - `SGLANG_FORCE_STANDARD_TOPK=1` forces STANDARD top‑k path so `on_select_experts` always emits.
+  - Set `SGLANG_EXTRA_ARGS="--moe-runner-backend triton"` to avoid BYPASSED fast paths.
+
+Quick smoke:
+
+```
+curl -sf -X POST http://127.0.0.1:30000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"local","messages":[{"role":"user","content":"List three prime numbers."}],"temperature":0.2,"max_tokens":8}' >/dev/null
+curl -sf http://127.0.0.1:30000/dump_expert_distribution_record >/dev/null
+ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1
+head -n 2 $(ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1)
+```
+
+Analyzer:
+
+```
+python3 tools/analyze_expert_trace.py --dir $HOME/sglang-observability/telemetry/expert-trace --top 10
+```
