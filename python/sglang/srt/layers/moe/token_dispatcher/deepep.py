@@ -361,6 +361,15 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             event,
         ) = self._dispatch_core(hidden_states, topk_idx, topk_weights, previous_event)
         event.current_stream_wait() if self.async_finish else ()
+        # Optional post-dispatch emit of per-token expert ids for tracing (decode-safe)
+        try:
+            if get_bool_env_var("SGLANG_MOE_TRACE_FROM_DISPATCH"):
+                get_global_expert_distribution_recorder().on_select_experts(
+                    topk_ids=topk_idx
+                )
+        except Exception:
+            # Best-effort tracing; never break dispatch
+            pass
         return DeepEPNormalOutput(
             hidden_states, topk_idx, topk_weights, num_recv_tokens_per_expert
         )
@@ -554,6 +563,15 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         get_global_expert_distribution_recorder().on_deepep_dispatch_low_latency(
             masked_m
         )
+
+        # Optional post-dispatch emit (low-latency path)
+        try:
+            if get_bool_env_var("SGLANG_MOE_TRACE_FROM_DISPATCH"):
+                get_global_expert_distribution_recorder().on_select_experts(
+                    topk_ids=topk_idx
+                )
+        except Exception:
+            pass
 
         deepep_output = DeepEPLLOutput(
             hidden_states,

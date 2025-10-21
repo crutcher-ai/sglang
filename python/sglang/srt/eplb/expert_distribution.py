@@ -182,21 +182,16 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
             self._disable_all = previous_disable_all
 
     def _on_forward_pass_start(self, forward_batch: ForwardBatch):
-        if not self._recording:
-            if self._expert_trace_writer:
-                step_id = self._current_forward_pass_id.value
-                if step_id is not None:
-                    self._expert_trace_writer.on_forward_pass_start(
-                        step_id, forward_batch
-                    )
-            return
-        for gatherer_key, gatherer in self._single_pass_gatherers.items():
-            gatherer.reset()
-            gatherer.on_forward_pass_start(forward_batch)
         if self._expert_trace_writer:
             step_id = self._current_forward_pass_id.value
             if step_id is not None:
                 self._expert_trace_writer.on_forward_pass_start(step_id, forward_batch)
+
+        if not self._recording:
+            return
+        for gatherer_key, gatherer in self._single_pass_gatherers.items():
+            gatherer.reset()
+            gatherer.on_forward_pass_start(forward_batch)
 
     def _on_forward_pass_end(self, forward_pass_id: int):
         if not self._recording:
@@ -253,16 +248,20 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
                 layer_idx=self._current_layer_idx.value, **kwargs
             )
 
-        if (
-            self._expert_trace_writer
-            and hook_name == "on_select_experts"
-            and "topk_ids" in kwargs
-        ):
+        if self._expert_trace_writer and hook_name == "on_select_experts":
             step_id = self._current_forward_pass_id.value
             layer_idx = self._current_layer_idx.value
-            if step_id is not None and layer_idx is not None:
+
+            ids_tensor = kwargs.get("topk_ids")
+            ids_kind = "topk_ids" if ids_tensor is not None else "unknown"
+            if ids_tensor is None:
+                ids_tensor = kwargs.get("topk_idx")
+                if ids_tensor is not None:
+                    ids_kind = "topk_idx"
+
+            if step_id is not None and layer_idx is not None and ids_tensor is not None:
                 self._expert_trace_writer.handle_on_select_experts(
-                    step_id, layer_idx, kwargs["topk_ids"]
+                    step_id, layer_idx, ids_tensor, ids_kind
                 )
 
     def _reset(self):
@@ -399,9 +398,8 @@ class _SinglePassGatherer(ABC):
 
 
 class _DetailSinglePassGatherer(_SinglePassGatherer):
-    # Default top-k experts recorded per token. Qwen3‑Next uses 10.
-    # TODO: generalize to derive from model config or router at runtime.
-    _TOP_K_NUM = 10
+    # Default top-k experts recorded per token. Allow override via env to match router config (e.g., 10+1 shared).
+    _TOP_K_NUM = int(os.environ.get("SGLANG_MOE_TRACE_TOPK", "10"))
 
     def __init__(
         self,

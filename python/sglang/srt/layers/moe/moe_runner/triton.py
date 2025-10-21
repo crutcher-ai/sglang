@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 import triton.language as tl
 
+from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers.moe.moe_runner.base import (
     MoeQuantInfo,
     MoeRunnerConfig,
@@ -19,7 +20,13 @@ from sglang.srt.layers.moe.moe_runner.base import (
     register_pre_permute,
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
-from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip
+from sglang.srt.utils import (
+    cpu_has_amx_support,
+    get_bool_env_var,
+    is_cpu,
+    is_cuda,
+    is_hip,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher.standard import (
@@ -122,9 +129,28 @@ class TritonRunnerCore(MoeRunnerCore):
         hidden_states = runner_input.hidden_states
         topk_weights = runner_input.topk_weights
         topk_ids = runner_input.topk_ids
+
+        # Optional: emit per-token top-k ids for tracing (covers decode under Triton)
+        try:
+            if get_bool_env_var("SGLANG_MOE_TRACE_DECODE_FROM_RUNNER"):
+                rec = get_global_expert_distribution_recorder()
+                if rec is not None:
+                    rec.on_select_experts(topk_ids=topk_ids)
+        except Exception:
+            pass
         sorted_token_ids = runner_input.sorted_token_ids
         expert_ids = runner_input.expert_ids
         num_tokens_post_padded = runner_input.num_tokens_post_padded
+
+        # Optional: emit per-token expert ids for tracing (covers decode under Triton path)
+        try:
+            if get_bool_env_var("SGLANG_MOE_TRACE_DECODE_FROM_RUNNER"):
+                rec = get_global_expert_distribution_recorder()
+                # Use recorder's hook to preserve step/layer context when available
+                rec.on_select_experts(topk_ids=topk_ids)
+        except Exception:
+            # Tracing is best-effort; never break execution
+            pass
 
         w13 = quant_info.w13_weight
         w2 = quant_info.w2_weight

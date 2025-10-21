@@ -53,6 +53,21 @@ class MoeRunner:
         self, dispatch_output: DispatchOutput, quant_info: MoeQuantInfo
     ) -> CombineInput:
 
+        # Optional: assert moe runner backend during decode, to avoid ambiguity
+        try:
+            want = os.environ.get("SGLANG_ASSERT_MOE_RUNNER", "")
+            if want:
+                from sglang.srt.layers.moe import get_moe_runner_backend
+
+                got = getattr(get_moe_runner_backend(), "value", None)
+                if got and got != want:
+                    raise RuntimeError(
+                        f"[trace_debug] Expected moe_runner_backend={want}, got {got}"
+                    )
+        except Exception:
+            # Don't perturb execution in production; this is a debug aid
+            pass
+
         if self.fused_func is not None:
             return self.fused_func(dispatch_output, quant_info, self.config)
 

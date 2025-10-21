@@ -1277,6 +1277,15 @@ class ExpertDistributionReqType(Enum):
 class ExpertDistributionReq(BaseReq):
     action: ExpertDistributionReqType
 
+    def __init__(
+        self,
+        *,
+        action: ExpertDistributionReqType,
+        rid: Optional[Union[str, List[str]]] = None,
+    ):
+        self.rid = rid
+        self.action = action
+
 
 @dataclass
 class ExpertDistributionReqOutput(BaseReq):

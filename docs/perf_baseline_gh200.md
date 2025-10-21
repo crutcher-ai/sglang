@@ -169,7 +169,7 @@ Enable recorder + JSONL writer at launch. Files are written to `/telemetry/exper
 ```
 EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
 SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
-SGLANG_MOE_TRACE_PHASE=decode \
+SGLANG_MOE_TRACE_PHASE=all \
 SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
 ENABLE_TRACE=1 OTEL_TRACES_SAMPLER=always_on \
 MEM_FRACTION_STATIC=0.98 CONTEXT_LENGTH=16384 MAX_TOTAL_TOKENS=16384 MAX_PREFILL_TOKENS=16384 \
@@ -186,8 +186,12 @@ ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -
 
 Troubleshooting (empty JSONL):
 
-- Force STANDARD top‑k hooks: `SGLANG_FORCE_STANDARD_TOPK=1` and `SGLANG_EXTRA_ARGS="--moe-runner-backend triton"`.
+- Force STANDARD Top‑K: `SGLANG_FORCE_STANDARD_TOPK=1` and run with `SGLANG_EXTRA_ARGS="--moe-runner-backend standard"`.
+- Keep Triton and enable decode‑time taps:
+  - `SGLANG_MOE_TRACE_DECODE_FROM_RUNNER=1` (runner tap), `SGLANG_MOE_TRACE_FROM_DISPATCH=1` (EP=1 backstop).
+  - Optional: `SGLANG_MOE_TRACE_TOPK=11` to reflect 10+1 shared in summaries.
 - Ensure `/telemetry/expert-trace` is writable by the `devuser` inside the container.
+- Verify CLI flags reached the server: look for `[trace_debug] argv=...` in `observability.log`.
 
 ### HBM min/mean/max during windows
 

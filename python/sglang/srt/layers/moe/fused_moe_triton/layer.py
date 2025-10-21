@@ -830,15 +830,34 @@ class FusedMoE(torch.nn.Module):
             elif TopKOutputChecker.format_is_triton_kernel(topk_output):
                 raise NotImplementedError()
 
-        dispatch_output = self.dispatcher.dispatch(
-            hidden_states=hidden_states, topk_output=topk_output
+        from sglang.srt.eplb.expert_distribution import (
+            get_global_expert_distribution_recorder,
         )
 
-        # TODO: consider using symmetric memory
-        combine_input = self.quant_method.apply(
-            layer=self,
-            dispatch_output=dispatch_output,
-        )
+        _rec = get_global_expert_distribution_recorder()
+        _ctx = None
+        try:
+            _ctx = _rec.with_current_layer(self.layer_id)
+            _ctx.__enter__()
+        except Exception:
+            _ctx = None
+
+        try:
+            dispatch_output = self.dispatcher.dispatch(
+                hidden_states=hidden_states, topk_output=topk_output
+            )
+
+            # TODO: consider using symmetric memory
+            combine_input = self.quant_method.apply(
+                layer=self,
+                dispatch_output=dispatch_output,
+            )
+        finally:
+            if _ctx is not None:
+                try:
+                    _ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
 
         final_hidden_states = self.dispatcher.combine(combine_input)
 

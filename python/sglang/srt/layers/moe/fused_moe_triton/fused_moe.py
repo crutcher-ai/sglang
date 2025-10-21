@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 import triton.language as tl
 
+from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
 from sglang.srt.utils import (
     cpu_has_amx_support,
@@ -263,6 +264,15 @@ def fused_experts(
     block_shape: Optional[List[int]] = None,
 ):
     topk_weights, topk_ids, _ = topk_output
+    # Optional: emit per-token expert ids for tracing (covers TRITON fused path)
+    try:
+        if get_bool_env_var("SGLANG_MOE_TRACE_DECODE_FROM_RUNNER") or get_bool_env_var(
+            "SGLANG_MOE_TRACE_FROM_DISPATCH"
+        ):
+            rec = get_global_expert_distribution_recorder()
+            rec.on_select_experts(topk_ids=topk_ids)
+    except Exception:
+        pass
     if moe_runner_config.inplace:
         assert not moe_runner_config.no_combine, "no combine + inplace makes no sense"
         torch.ops.sglang.inplace_fused_experts(

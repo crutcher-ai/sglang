@@ -23,6 +23,7 @@ import json
 import logging
 import multiprocessing as multiprocessing
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -204,6 +205,11 @@ async def init_multi_tokenizer() -> ServerArgs:
         server_args.enable_trace,
         os.environ.get("SGL_DEBUG"),
     )
+    # Debug: show argv so we can verify SGLANG_EXTRA_ARGS are passed through
+    try:
+        logger.warning("[trace_debug] argv=%s", " ".join(sys.argv))
+    except Exception:
+        pass
     if server_args.enable_trace:
         _trace_probe(
             f"init_multi_tokenizer calling process_tracing_init endpoint={server_args.oltp_traces_endpoint}"

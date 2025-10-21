@@ -127,7 +127,7 @@ Enable at launch (envs are forwarded by `start_server.sh` into the model process
 ```
 EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
 SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
-SGLANG_MOE_TRACE_PHASE=decode \
+SGLANG_MOE_TRACE_PHASE=all \
 SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
 ./scripts/infer/start_server.sh
 ```
@@ -136,6 +136,57 @@ SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
 - Optional diagnostics:
   - `SGLANG_FORCE_STANDARD_TOPK=1` forces STANDARD top‑k path so `on_select_experts` always emits.
   - Set `SGLANG_EXTRA_ARGS="--moe-runner-backend triton"` to avoid BYPASSED fast paths.
+
+### Decode‑time taps (env‑gated; 2025‑10‑20)
+
+Some model/backend mixes (e.g., Qwen3‑Next‑80B‑A3B FP8, EP=1, flashinfer/fa3 decode) take a fused Triton path during decode that does not call Python Top‑K. We added tiny opt‑in taps to surface per‑token expert ids during decode:
+
+- `SGLANG_MOE_TRACE_DECODE_FROM_RUNNER=1` — emit indices inside the Triton decode runner (authoritative fused path).
+- `SGLANG_MOE_TRACE_FROM_DISPATCH=1` — emit in the EP=1 standard dispatcher as a backstop.
+- `SGLANG_MOE_TRACE_TOPK=11` — optional summarizer K for “10+1 shared” reports (raw traces still store full [T,K]).
+- `SGLANG_ASSERT_MOE_RUNNER=triton|standard` — optional runtime assert to prove backend selection during decode.
+- `SGLANG_MOE_TRACE_DEDUP=1` — writer‑side de‑dup within a step (default on).
+
+Examples:
+
+```
+# Triton fused path + decode taps
+EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
+SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
+SGLANG_MOE_TRACE_PHASE=all \
+SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
+SGLANG_MOE_TRACE_DECODE_FROM_RUNNER=1 \
+SGLANG_MOE_TRACE_FROM_DISPATCH=1 \
+SGLANG_MOE_TRACE_TOPK=11 \
+SGLANG_ASSERT_MOE_RUNNER=triton \
+SGLANG_EXTRA_ARGS="--moe-runner-backend triton --disable-cuda-graph --disable-cuda-graph-padding" \
+READY_TIMEOUT=600 ./scripts/infer/start_server.sh
+
+# STANDARD proof (routes decode through Python Top‑K)
+SGLANG_FORCE_STANDARD_TOPK=1 \
+SGLANG_EXTRA_ARGS="--moe-runner-backend standard --disable-cuda-graph --disable-cuda-graph-padding" \
+READY_TIMEOUT=600 ./scripts/infer/start_server.sh
+```
+
+After issuing a short request and dumping the recorder:
+
+```
+python3 tools/analyze_expert_trace.py \
+  --dir $HOME/sglang-observability/telemetry/expert-trace \
+  --phase decode --dedupe --step-window 50
+```
+
+You should see non‑zero `phase=decode` rows once the active decode path emits.
+
+### Verifying flags actually reached the server
+
+We now log the process argv at worker init (one‑liner in `http_server.py`). Check your run’s `observability.log` for a line like:
+
+```
+[trace_debug] argv=/usr/bin/python3 -m sglang.launch_server --model-path ... --moe-runner-backend triton --disable-cuda-graph ...
+```
+
+If flags are missing, adjust your launch script or `SGLANG_EXTRA_ARGS`.
 
 Quick smoke:
 

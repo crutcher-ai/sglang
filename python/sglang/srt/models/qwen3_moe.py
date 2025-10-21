@@ -227,6 +227,20 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                         layer_id=self.layer_id,
                     ),
                 )
+                # Optional force-emit for tracing to cover decode paths
+                try:
+                    import os
+
+                    if os.getenv("SGLANG_MOE_TRACE_FORCE_EMIT", "0").lower() not in (
+                        "0",
+                        "false",
+                        "no",
+                    ):
+                        get_global_expert_distribution_recorder().on_select_experts(
+                            topk_ids=state.topk_idx_local
+                        )
+                except Exception:
+                    pass
         else:
             state.topk_idx_local = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device

@@ -1,0 +1,2054 @@
+diff --git a/docs/moe_trace_curriculum.md b/docs/moe_trace_curriculum.md
+new file mode 100644
+index 000000000..60fc3786a
+--- /dev/null
++++ b/docs/moe_trace_curriculum.md
+@@ -0,0 +1,97 @@
++# Curriculum: Preparing to Instrument MoE Router Decisions (Qwen3‑Next)
++
++This study plan reflects the current code and launcher behavior. It replaces older notes and removes prior cruft. Follow it in order.
++
++Important ground rules (read‑only phase)
++- Do not modify files or commit changes while studying.
++- Do not execute tests.
++- Your goal is to understand how the helper, launcher, observability surfaces, and harnesses work; how to discover and analyze artifacts; and where/what to instrument for MoE router decisions (top‑k experts).
++- After this study, you’ll be quizzed. Only after passing the follow‑up questions will you be allowed to make code changes or run tests.
++
++## 0) Orientation (10–15 min)
++Read:
++- `python/sglang/README.md`
++- `docs/perf_baseline_gh200.md`
++- `docs/inference_harness.md`
++- `docs/observability_tracing_ops.md` (see “Expert Trace (MoE)”).
++
++## 1) Observability helper & topology (20–30 min)
++Files: `.devcontainer/README.md`, `scripts/start_observable_container.sh`, `.devcontainer/observability/init-run.sh`.
++Learn:
++- Components/ports: Jaeger v2 (UI 16686, OTLP 4317/4318), Prometheus (9090), node_exporter (9100), dcgm‑exporter (9400).
++- Pointer → manifest: `$HOME/sglang-observability/telemetry/container_run_meta.env` → `.../container_runs/<RUN_ID>/manifest.json`.
++- Session records on server ready: `logs/provider_sessions/<ISO>_<SESSION>/start.json`.
++- Trace dir mapping: container `/telemetry/expert-trace` → host `$HOME/sglang-observability/telemetry/expert-trace`.
++Self‑check: list the ports, and where Prom/Jaeger TSDBs land.
++
++## 2) Server lifecycle & readiness (20–30 min)
++Files: `scripts/infer/start_server.sh`, `scripts/infer/status.sh|stop_server.sh|session_info.sh`, `python/sglang/srt/entrypoints/http_server.py` (`/trace_probe`).
++Learn:
++- Env→CLI basics: `MEM_FRACTION_STATIC`, `CONTEXT_LENGTH`, `MAX_{PREFILL,TOTAL}_TOKENS`, `MAX_MAMBA_CACHE_SIZE`, `KV_CACHE_DTYPE`.
++- Tracing: `ENABLE_TRACE=1`; `OTEL_TRACES_SAMPLER`; resource attrs `container_run`, `service.instance.id`.
++- MoE recorder + writer (forwarded by the launcher):
++  - `EXPERT_DISTRIBUTION_RECORDER_MODE` → `--expert-distribution-recorder-mode`.
++  - `SGLANG_MOE_TRACE_DIR`, `SGLANG_MOE_TRACE_PHASE`, `SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC`.
++  - Diagnostic: `SGLANG_FORCE_STANDARD_TOPK=1` to force STANDARD top‑k and guarantee emission.
++- Readiness gates: `/get_model_info` returns 200; `/trace_probe` shows `{"tracing_enabled": true, "threads_registered": >0}`.
++Self‑check: identify `port`, `run_id`, `session_record_host_path`, and the `sizing` block from a ready JSON.
++
++## 3) Online window bench + analyzer (25–35 min)
++Files: `scripts/bench/run_window_bench.sh`, `scripts/bench/http_bench.py`, `scripts/bench/analyze_window.py`.
++Learn:
++- Flow: capture `/metrics` before/after, sample node/DCGM 1 Hz to `samples.csv`, run workload, produce `http_summary.json` and `tokens_report.json`.
++- CSV numeric fix (`awk '{print $NF}'`).
++- `BENCH_ROOT` / `BENCH_PAYLOAD_PATH{,S}` and `http_bench.py --body|--bodies`.
++- Analyzer math: counter deltas; hist sums; wall vs. stage TPS.
++Self‑check: explain wall vs. stage TPS and exact metric names used.
++
++## 4) Offline benches & datasets (20–30 min)
++Files/docs: `python/sglang/bench_offline_throughput.py`, docs (Offline Benchmarks).
++Learn:
++- `engine` vs `runtime`; runtime may inflate token counts.
++- random / ShareGPT / GSP datasets and sizing pitfalls; keep GSP system prompt len a few hundred under cap.
++Self‑check: why 15,900 can overflow 16k, and which flag avoids it.
++
++## 5) Tracing & metrics surfaces (15–20 min)
++Files: `docs/observability_tracing_ops.md`, `test/srt/test_trace_thread_registration.py`.
++Learn:
++- Jaeger v2: UI 16686; API v3; smoke-span proof.
++- `/trace_probe` reflects tracer state; auto thread registration matters.
++- Prom metrics for token counts and latencies.
++Self‑check: filter a session in Jaeger by resource attrs.
++
++## 6) Memory model & admission (30–40 min)
++Files: `python/sglang/srt/model_executor/model_runner.py`, `python/sglang/srt/configs/mamba_utils.py`, `python/sglang/srt/configs/qwen3_next.py`.
++Learn: `profile_max_num_token` and KV cell sizes; pool init guardrails; why `MAX_MAMBA_CACHE_SIZE≈concurrency` avoids waste.
++Self‑check: run through a 16k ctx example and confirm clamping.
++
++## 7) MoE routing: instrumentation points (30–45 min)
++Files: `python/sglang/srt/layers/moe/*`, `python/sglang/srt/eplb/*`, `python/sglang/srt/managers/*`.
++Learn:
++- Router → logits/probabilities → top‑k selection per token.
++- Hooks: `on_select_experts` (STANDARD TopK) and DeepEP dispatch hooks.
++- Emission: ExpertTraceWriter JSONLs (per‑step), recorder accumulators (.pt).
++- Config: recorder mode, writer envs, optional `SGLANG_FORCE_STANDARD_TOPK=1` to ensure hooks fire; careful with cardinality.
++Self‑check: identify where to insert lightweight attributes or metrics with minimal overhead.
++
++## 8) Tests (read‑only)
++Files: `test/`.
++Learn: where trace and bench tests live and what they assert.
++
++## 9) Expert Trace (prototype, updated) (20–30 min)
++Files: `python/sglang/srt/trace/expert_trace.py`, `python/sglang/srt/eplb/expert_distribution.py`, `tools/analyze_expert_trace.py`.
++Learn:
++- Writer activation via `SGLANG_MOE_TRACE_DIR`.
++- Hooks: `on_forward_pass_start`, `handle_on_select_experts`, `flush`.
++- File naming: `expert_trace_<run>_<session>_rankXXXXX.jsonl`.
++- Analyzer: per‑layer totals and top‑N experts.
++Self‑check: where slots/positions/seq_lens come from (ForwardBatch).
++
++## 10) Qwen3‑Next expert metadata (5–10 min)
++File: `python/sglang/srt/models/qwen3_next.py`.
++Learn: `get_model_config_for_expert_location(...)` is present; per_token recorder aligned to top‑10.
++Self‑check: explain the assertion if a model lacks this hook.
++
++---
++
++Reminder: During this read‑only phase, do not modify files or run tests. Focus on understanding and be ready to answer the follow‑up mastery questions before making any changes.
+diff --git a/docs/observability_tracing_ops.md b/docs/observability_tracing_ops.md
+new file mode 100644
+index 000000000..fba1001c3
+--- /dev/null
++++ b/docs/observability_tracing_ops.md
+@@ -0,0 +1,155 @@
++# Tracing Ops — Jaeger v2 + Upstream SGLang
++
++## Start Order
++- Start the observability helper + Jaeger v2 on host ports:
++  - `./scripts/start_observable_container.sh`
++  - The helper recreates the Jaeger v2 container (data persists via bind mounts). Health: `curl -fsS http://localhost:13133/status` → HTTP 200.
++- Start the SGLang server with upstream flags only:
++  - `ENABLE_TRACE=1 OTEL_TRACES_SAMPLER=always_on ./scripts/infer/start_server.sh`
++  - On ready, the script prints one JSON line and writes the exact JSON atomically to `logs/provider_sessions/<ISO>_<SESSION>/start.json`.
++- Run SLICE‑Bench or your workload; Jaeger queries use API v3.
++
++## One‑liner to start Jaeger v2 manually (optional)
++```
++cat <<'YAML' > jaeger-config.yaml
++service:
++  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
++  pipelines:
++    traces:
++      receivers: [otlp]
++      processors: [batch]
++      exporters: [jaeger_storage_exporter]
++
++receivers:
++  otlp:
++    protocols:
++      grpc:
++        endpoint: 0.0.0.0:4317
++      http:
++        endpoint: 0.0.0.0:4318
++
++exporters:
++  jaeger_storage_exporter:
++    trace_storage: badger_store
++
++processors:
++  batch: {}
++
++extensions:
++  healthcheckv2:
++    use_v2: true
++    http:
++      endpoint: 0.0.0.0:13133
++      status:
++        enabled: true
++  jaeger_query:
++    storage:
++      traces: badger_store
++    grpc:
++      endpoint: 0.0.0.0:16685
++    http:
++      endpoint: 0.0.0.0:16686
++  jaeger_storage:
++    backends:
++      badger_store:
++        badger:
++          directories:
++            keys: /badger/keys
++            values: /badger/values
++          ephemeral: false
++YAML
++
++mkdir -p $HOME/sglang-observability/jaeger-v2/keys $HOME/sglang-observability/jaeger-v2/values
++docker run -d --name jaeger-v2 \
++  -p 16686:16686 -p 4317:4317 -p 4318:4318 -p 13133:13133 \
++  -v $HOME/sglang-observability/jaeger-v2:/badger \
++  -v $PWD/jaeger-config.yaml:/etc/jaeger/config.yaml:ro \
++  jaegertracing/jaeger:2.11.0 \
++  --config=/etc/jaeger/config.yaml
++```
++
++## Tiny OTLP probe (Python)
++```
++# pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc
++from opentelemetry import trace
++from opentelemetry.sdk.resources import Resource
++from opentelemetry.sdk.trace import TracerProvider
++from opentelemetry.sdk.trace.export import BatchSpanProcessor
++from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
++
++provider = TracerProvider(resource=Resource.create({"service.name": "probe"}))
++provider.add_span_processor(BatchSpanProcessor(
++    OTLPSpanExporter(endpoint="http://127.0.0.1:4317")
++))
++trace.set_tracer_provider(provider)
++
++tracer = trace.get_tracer("probe")
++with tracer.start_as_current_span("smoke-span"):
++    pass
++provider.shutdown()
++```
++
++## Per-Run Artefacts
++- `$HOME/sglang-observability/telemetry/container_runs/<RUN_ID>/`
++  - `manifest.json` (authoritative per‑run manifest)
++  - `logs/observability.log` (helper + server breadcrumbs)
++  - `logs/provider_sessions/<ISO>_<SESSION>/start.json` (authoritative session metadata; atomic write)
++  - `prometheus/` (Prometheus TSDB)
++  - `jaeger/badger/{keys,values}/` (Jaeger v2 store)
++  - `configs/` (Prometheus + Jaeger YAML snapshots)
++
++## Verify (Evidence‑First)
++- UI: http://localhost:16686 (service `sglang`).
++- Files under your run dir:
++  - `telemetry/jaeger_services.json` includes `sglang`.
++  - `telemetry/jaeger_probe.json` has `result.resourceSpans` populated.
++  - `telemetry/jaeger_traces.json` has `result.resourceSpans` populated after filtering.
++  - All Jaeger API calls use `/api/v3/*` with nested `query.*` parameters.
++
++## Attach to an Existing Session
++- Use the read‑only helper: `scripts/infer/session_info.sh --manifest <ABS_MANIFEST_PATH>`.
++- Prints the newest `logs/provider_sessions/*/start.json` verbatim. Exit codes:
++  - 0: success; 2: inconsistent/missing session start.json; 3: bad pointer/manifest; 4: runtime error.
++- There are no fallbacks (no log scanning, no synthesized metadata).
++
++## Notes
++- No Jaeger v1 fallback.
++- Upstream SGLang flags only: `--enable-trace` and `--oltp-traces-endpoint <host:port>`.
++- Jaeger v3 responses are OTLP JSON envelopes (`result.resourceSpans[...]`); the legacy `data[]` payload is gone by design.
++- Tracing resource attributes: `container_run=<RUN_ID>`, `service.instance.id=<SERVER_SESSION_ID>`.
++
++## Expert Trace (MoE)
++
++The ExpertTraceWriter captures per‑step MoE top‑k selections per layer as JSONL for offline analysis.
++
++Enable at launch (envs are forwarded by `start_server.sh` into the model process):
++
++```
++EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
++SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
++SGLANG_MOE_TRACE_PHASE=decode \
++SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
++./scripts/infer/start_server.sh
++```
++
++- Files land under host: `$HOME/sglang-observability/telemetry/expert-trace/`
++- Optional diagnostics:
++  - `SGLANG_FORCE_STANDARD_TOPK=1` forces STANDARD top‑k path so `on_select_experts` always emits.
++  - Set `SGLANG_EXTRA_ARGS="--moe-runner-backend triton"` to avoid BYPASSED fast paths.
++
++Quick smoke:
++
++```
++curl -sf -X POST http://127.0.0.1:30000/v1/chat/completions \
++  -H 'Content-Type: application/json' \
++  -d '{"model":"local","messages":[{"role":"user","content":"List three prime numbers."}],"temperature":0.2,"max_tokens":8}' >/dev/null
++curl -sf http://127.0.0.1:30000/dump_expert_distribution_record >/dev/null
++ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1
++head -n 2 $(ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1)
++```
++
++Analyzer:
++
++```
++python3 tools/analyze_expert_trace.py --dir $HOME/sglang-observability/telemetry/expert-trace --top 10
++```
+diff --git a/docs/perf_baseline_gh200.md b/docs/perf_baseline_gh200.md
+new file mode 100644
+index 000000000..7ac252512
+--- /dev/null
++++ b/docs/perf_baseline_gh200.md
+@@ -0,0 +1,306 @@
++# GH200 Hopper (96 GB HBM3) — Perf + Memory Baseline, Observability, and Bench Harness
++
++This document is a complete, end‑to‑end handoff of how the repo is set up to:
++
++- launch the helper + server in a single, upstream‑style path/venv,
++- collect rich telemetry (Prometheus + Jaeger v2),
++- run a windowed HTTP benchmark with metrics sampling, and
++- reason about memory headroom and parallelism (slots) with a repeatable method.
++
++It reflects the exact changes/scripts now in the tree and the empirical results we measured on a GH200 with 96 GB HBM3 and 480 GB host DDR (DCGM FB_* refers to HBM only).
++
++## Environment and Topology
++
++- Hardware: NVIDIA GH200 (SM90), 96 GB HBM3, plus 480 GB host DDR (DCGM FB_* ≡ HBM3).
++- Driver/CUDA: 12.9.
++- Base image inside helper: `lmsysorg/sglang:dev` (arm64) with CUDA torch 2.8.0+cu129 in system site‑packages.
++- Helper container runs Prometheus (9090), node_exporter (9100), dcgm‑exporter (9400), and Jaeger v2 (UI 16686, OTLP gRPC 4317).
++- Canonical repo mount inside container: `/sgl-workspace/sglang` (upstream‑aligned).
++
++## One Mount / One Venv
++
++- Venv lives at `/sgl-workspace/sglang/.venv`.
++- Venv created with `--system-site-packages` so it can use the container’s CUDA torch.
++- sglang installed editable `--no-deps` to avoid pulling CPU torch into the venv.
++- No PYTHONPATH hacks; only the venv interpreter is used.
++
++## Observability Helper
++
++- Start helper + exporters:
++  - `./scripts/start_observable_container.sh`
++  - Writes pointer: `~/sglang-observability/telemetry/container_run_meta.env`.
++  - Prints the per‑run manifest JSON paths (host + container).
++- Inside the helper, Jaeger v2 is OTLP‑native and served on host: 16686 (UI), 4317/4318 (OTLP).
++- Prometheus scrapes node_exporter + dcgm‑exporter. SGLang `/metrics` is scraped by the bench harness on demand (we don’t auto‑add that scrape target).
++
++## Server Launcher (inside helper)
++
++- Script: `scripts/infer/start_server.sh`
++- Reads `.devcontainer/tools/sglang-config.json` inside container and applies env overrides.
++- CUDA preflight checks torch.cuda and CUDA 12.9.
++- Exports structured trace resource attrs: `container_run=<run_id>`, `service.instance.id=<server_session_id>`.
++- Caches go under `/profiles/{triton,torchinductor,flashinfer,deep_gemm,moe_configs}`.
++- NEW: You can pass arbitrary extra CLI args to `sglang.launch_server` via `SGLANG_EXTRA_ARGS`. Example:
++  - `SGLANG_EXTRA_ARGS="--mamba-ssm-dtype bfloat16"` (see capacity notes below).
++
++### Common env overrides
++
++- `MEM_FRACTION_STATIC` (float)
++- `CONTEXT_LENGTH`, `MAX_TOTAL_TOKENS`, `MAX_PREFILL_TOKENS` (ints)
++- `MAX_MAMBA_CACHE_SIZE` (int ∼ slot cap)
++- `KV_CACHE_DTYPE` (`fp8_e4m3` for FP8 KV)
++- `ENABLE_TRACE=1` `OTEL_TRACES_SAMPLER=always_on`
++
++## Windowed Bench Harness
++
++- Runner: `scripts/bench/run_window_bench.sh`
++  - Input vars: `CONCURRENCY` (default 8), `TOTAL` (default 80)
++  - Captures SGLang `/metrics` before/after window.
++  - Samples dcgm (9400) and node (9100) once/sec to `samples.csv` during the window.
++  - Emits a bench directory under the current run: `~/sglang-observability/telemetry/container_runs/<run_id>/benchmarks/<timestamp>/`.
++- Analyzer: `scripts/bench/analyze_window.py <bench_dir> --out <bench_dir>/tokens_report.json`
++  - Computes wall TPS and stage TPS (prefill vs decode) from Prom metrics deltas and histogram sums.
++
++### CSV fix (important)
++
++- `scripts/bench/run_window_bench.sh` now writes numeric values for DCGM and node metrics using `grep -E ... | awk '{print $NF}'`. This avoids the earlier issue where model strings (e.g., `GH200`) polluted numeric fields.
++
++### Quick smoke
++
++- `CONCURRENCY=96 TOTAL=640 scripts/bench/run_window_bench.sh`
++- Then analyze: `python3 scripts/bench/analyze_window.py <bench_dir> --out <bench_dir>/tokens_report.json`
++
++## Memory / Parallelism: What We Measured
++
++We report everything as observed in DCGM (HBM3) and from server log pool sizes.
++
++- KV pool:
++  - FP8 KV (`fp8_e4m3`) at 16k ctx: ≈ 0.18 GB (K+V).
++  - FP8 KV at 32k ctx: ≈ 0.38 GB.
++  - FP8 KV at 262k ctx: ≈ 3.0 GB.
++  - KV is small vs. per‑slot costs at lower contexts.
++
++- Mamba pool (hybrid GDN/Mamba):
++  - Log line: `Mamba Cache is allocated. conv_state size: X GB, ssm_state size: Y GB`.
++  - Empirical per‑slot increment (16k ctx): ≈ 73.6 MiB/slot (delta of Mamba between size 16 and 64 divided by 48).
++  - Switching Mamba SSM dtype to `bfloat16` reduces the large temporal state; per‑slot decreases materially (in practice the log deltas still aggregated ~3.45 GB from size 16→64 on our runs; we recommend validating this on each model).
++
++- Total per‑slot slope (decode‑heavy; mean over 20–60s windows):
++  - 262k ctx: ≈ 153.5 MiB/slot
++  - 32k ctx:  ≈ 96.2 MiB/slot
++  - 16k ctx:  ≈ 75–85 MiB/slot (mean window), with peak spikes 10–40 MiB/slot higher for ~tens of seconds post‑startup.
++
++### Startup spikes
++
++Using 60s windows immediately after readiness, peak‑based slopes ((max64−min16)/48) were consistently above mean‑based slopes by ~10–40 MiB/slot, indicating a brief allocator/graph‑capture “spike then settle”. For throughput windows, use the mean series during steady state.
++
++## Decode‑Heavy Throughput (ctx=16k, mfs=0.98, Mamba SSM bf16, MAX_MAMBA=160)
++
++- Concurrency 96
++  - Window: 69.15 s
++  - Tokens Δ: prefill 12,800; decode 163,840
++  - Wall TPS: prefill 185.10; decode 2,369.29
++  - Stage TPS: prefill 4.18; decode 49.59
++  - HBM (fb_used MiB) during window: min/mean/max = 94,330 / 94,330 / 94,330
++
++- Concurrency 112
++  - Window: 66.38 s
++  - Tokens Δ: prefill 12,800; decode 163,840
++  - Wall TPS: prefill 192.83; decode 2,468.18
++  - Stage TPS: prefill 3.37; decode 50.12
++  - HBM: min/mean/max = 94,330 / 94,330 / 94,330
++
++- Concurrency 128
++  - Window: 57.22 s
++  - Wall TPS (decode): 2,863.55
++
++- Concurrency 160
++  - Window: 58.89 s
++  - Wall TPS (decode): 2,782.03
++
++The decode‑heavy knee sits near ~128 for this model/config; aggregate throughput slightly regresses at 160.
++
++## Operational Runbook
++
++### Start helper
++
++```
++./scripts/start_observable_container.sh
++```
++
++Inspect pointer at `~/sglang-observability/telemetry/container_run_meta.env`.
++
++### Launch server (examples)
++
++Baseline decode‑heavy (bf16 Mamba SSM, ctx 16k):
++
++```
++SGLANG_EXTRA_ARGS="--mamba-ssm-dtype bfloat16" \
++MEM_FRACTION_STATIC=0.98 \
++ENABLE_TRACE=1 OTEL_TRACES_SAMPLER=always_on \
++MAX_MAMBA_CACHE_SIZE=160 CONTEXT_LENGTH=16384 MAX_TOTAL_TOKENS=16384 MAX_PREFILL_TOKENS=16384 \
++READY_TIMEOUT=600 ./scripts/infer/start_server.sh
++```
++
++If startup fails with “Not enough memory” at high caps:
++
++- Try a slightly smaller `MAX_MAMBA_CACHE_SIZE` (e.g., 160 → 144/152/160).
++- Or reduce `CONTEXT_LENGTH` (e.g., 16k → 12k) and retry.
++
++### Run windowed bench
++
++```
++CONCURRENCY=96  TOTAL=640 scripts/bench/run_window_bench.sh
++CONCURRENCY=112 TOTAL=640 scripts/bench/run_window_bench.sh
++CONCURRENCY=128 TOTAL=640 scripts/bench/run_window_bench.sh
++CONCURRENCY=160 TOTAL=640 scripts/bench/run_window_bench.sh
++```
++
++Analyze:
++
++```
++python3 scripts/bench/analyze_window.py <bench_dir> --out <bench_dir>/tokens_report.json
++```
++
++### MoE Expert Trace (per‑token) quick start
++
++Enable recorder + JSONL writer at launch. Files are written to `/telemetry/expert-trace` in the helper and mapped to the host under `$HOME/sglang-observability/telemetry/expert-trace`.
++
++```
++EXPERT_DISTRIBUTION_RECORDER_MODE=per_token \
++SGLANG_MOE_TRACE_DIR=/telemetry/expert-trace \
++SGLANG_MOE_TRACE_PHASE=decode \
++SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC=5 \
++ENABLE_TRACE=1 OTEL_TRACES_SAMPLER=always_on \
++MEM_FRACTION_STATIC=0.98 CONTEXT_LENGTH=16384 MAX_TOTAL_TOKENS=16384 MAX_PREFILL_TOKENS=16384 \
++MAX_MAMBA_CACHE_SIZE=160 READY_TIMEOUT=600 \
++./scripts/infer/start_server.sh
++
++# Drive a short decode, then flush and list
++curl -sf -X POST http://127.0.0.1:30000/v1/chat/completions \
++  -H 'Content-Type: application/json' \
++  -d '{"model":"local","messages":[{"role":"user","content":"List three prime numbers."}],"temperature":0.2,"max_tokens":8}' >/dev/null
++curl -sf http://127.0.0.1:30000/dump_expert_distribution_record >/dev/null
++ls -1t $HOME/sglang-observability/telemetry/expert-trace/expert_trace_* | head -1
++```
++
++Troubleshooting (empty JSONL):
++
++- Force STANDARD top‑k hooks: `SGLANG_FORCE_STANDARD_TOPK=1` and `SGLANG_EXTRA_ARGS="--moe-runner-backend triton"`.
++- Ensure `/telemetry/expert-trace` is writable by the `devuser` inside the container.
++
++### HBM min/mean/max during windows
++
++`<bench_dir>/samples.csv` has `fb_used_MiB` for quick min/mean/max (now always numeric).
++
++## Practical Guidance
++
++- Keep context low (16k) to maximize parallelism; per‑slot slope rises with context.
++- Use `--mamba-ssm-dtype bfloat16` to reduce Mamba per‑slot footprint materially.
++- Use `mem_fraction_static≈0.98` to robustly admit large slot caps; it doesn’t reduce per‑slot, it avoids negative budgets at startup.
++- Expect a short post‑startup HBM spike; size headroom accordingly.
++- Keep telemetry on while characterizing; disable after the baseline is locked to quantify overhead.
++
++## Files of Interest
++
++- scripts/start_observable_container.sh
++- scripts/infer/start_server.sh (supports `SGLANG_EXTRA_ARGS`)
++- .devcontainer/tools/sglang-config.json (defaults)
++- scripts/bench/run_window_bench.sh (CSV fixed for numeric FB_USED etc.)
++- scripts/bench/analyze_window.py (tokens_report.json)
++
++## Known Rough Edges
++
++- Very high `MAX_MAMBA_CACHE_SIZE` can fail at startup even with low context if the profiler computes a negative token budget. Reduce `MAX_MAMBA_CACHE_SIZE` or context a notch; or temporarily increase `mem_fraction_static` during admission testing.
++- cuda‑graph capture can transiently lift HBM; use a short window warmup before critical measurements.
++
++## Prefill‑Heavy + Mixed Workloads (New Findings)
++
++This section captures everything we learned while extending the baseline beyond the original decode‑heavy experiments.
++
++### Additions at a glance
++
++- Prefill‑heavy windows: larger prefill chunks at C=16 markedly improve throughput.
++- Mixed windows (prefill ~15.9k + decode ~256): aggregate TPS is dominated by prefill; overlap/“aggressiveness” knobs have minimal impact at this mix.
++- Chunk sweeps: documented wall TPS and stage TPS vs. chunk size.
++- Admission/warmup guidance for very large contexts (64k/128k/256k).
++- Runner ergonomics: multi‑payload mixes via `BENCH_PAYLOAD_PATHS` and `http_bench.py --bodies`.
++
++### Prefill‑only (C=16, ctx=16k): chunked prefill sweep
++
++- Setup: LongBench v2 context (~15,875 tokens; Qwen tokenizer). Caps: ctx=16k; `MAX_*_TOKENS=16k`; KV fp8; Mamba SSM bf16.
++- Prefill wall TPS (single windows):
++  - chunk 2k → ≈ 14,327
++  - chunk 8k → ≈ 23,482
++  - chunk 12k → ≈ 25,047
++  - chunk 16k → ≈ 32,830
++- Stage TPS rises with chunk size; larger chunks reduce scheduler/launch overhead.
++- With ctx raised to 32k for the same 16k prompt (chunk 16k), throughput stayed similar/slightly higher (~33,321). Compute is driven by actual tokens and chunk shape; the cap mainly affects admission.
++
++### Mixed (50/50 requests: prefill ~15.9k; decode ~256), ctx=16k
++
++- Aggregate wall TPS ≈ 11.9–12.1k across C=64..128; decode contributes ~196–198 TPS.
++- Marginal gains with concurrency are <5%; practical knee ~96–112 under a p95 e2e SLO.
++- Overlap (`--enable-two-batch-overlap`) and `--schedule-conservativeness ∈ {0.1,0.6,0.9}` did not move aggregate TPS at this mix.
++- Tiny chunks (1k) halve aggregate TPS (~6.3–6.5k) and lengthen windows.
++
++#### Additional observations (offline vs. online; practical knobs)
++
++- “Prefill” in our metrics is input tokens (delta of `sglang:prompt_tokens_total`).
++- Offline harnesses differ from the online window in scheduling and runtime overhead:
++  - `bench_offline_throughput --backend runtime` re-tokenizes prompts and may apply chat defaults; this can inflate token counts and trigger context guardrails if inputs are too close to the cap. Use datasets that explicitly control length (e.g., generated-shared-prefix) or add a margin below the cap.
++  - To mimic the online mixed window offline, set `--chunked-prefill-size 16384`, `--max-running-requests 96`, and use long-prefix datasets; expect decode rates (e.g., ~170 tok/s internal) to align in ballpark with online stage decode TPS, while aggregate prefill tok/s may differ due to the different loops.
++- Sizing: set `MAX_MAMBA_CACHE_SIZE` near your target concurrency (e.g., 96 for C≈96) to avoid wasting memory.
++- Readiness gates: enable tracing and `HELLO_AFTER_READY=1` (or a stricter `VERIFY_INFERENCE` if adopted) to ensure first-inference succeeds post‑startup.
++
++### Big prompts (assets + procedure)
++
++Payloads (raw context, Qwen tokenizer) live under `benchmarks-local/prompts/lb2_qwen3next` with a `manifest.json` detailing ids and token counts:
++
++- 32k (31,754): `lb2_qwen3next_32k_66ee8bab....json`
++- 64k (64,605): `lb2_qwen3next_64k_671b170c....json`
++- 128k (130,055): `lb2_qwen3next_128k_66f568dc....json`
++- 256k (255,047): `lb2_qwen3next_256k_66f2b546....json`
++
++Recommended runs (prefill‑only, C=16, one pass each):
++
++- For each target N ∈ {64k, 128k, 256k}:
++  - Set `CONTEXT_LENGTH=MAX_*_TOKENS=N` and `CHUNKED_PREFILL_SIZE=N` (full‑chunk prefill).
++  - If startup OOMs during CUDA graph capture/deep_gemm warmups, first lower `mem_fraction_static` (e.g., 0.98→0.94/0.92), and/or add `--cuda-graph-max-bs` (e.g., 16/8). If still failing, reduce `MAX_MAMBA_CACHE_SIZE` (160→96→64).
++  - Run a single window with `TOTAL=16`.
++  - Analyze with `scripts/bench/analyze_window.py` and record `tps_wall.prefill`, `tps_stage.prefill`, and `window_seconds`.
++
++These headroom tweaks are admission‑only; they do not change steady‑state per‑token slope.
++
++### Runner enhancements (multi‑payload and BENCH_ROOT‑only)
++
++- `scripts/bench/http_bench.py` supports `--bodies path1,path2,...` (round‑robin) for mixed workloads.
++- `scripts/bench/run_window_bench.sh`:
++  - `BENCH_PAYLOAD_PATHS` (comma‑separated) and `BENCH_PAYLOAD_PATH` (single) select payloads.
++  - `BENCH_ROOT` lets you run fully in‑container without a manifest (writes directly to the provided path).
++
++### Practical guidance (updated)
++
++- Prefill‑heavy at fixed C (e.g., 16): use the largest `chunked_prefill_size` admission allows; for single long prompts, full‑chunk prefill yields the best efficiency.
++- Mixed at 16k: if you want overlap/aggressiveness to matter, increase decode’s share (more tokens or higher mix weight). Otherwise prefill dominates and concurrency looks flat.
++- Keep bench artifacts organized via `BENCH_ROOT`; collect `sglang_before/after.prom`, `samples.csv`, `http_summary.json`, `tokens_report.json` per window.
++
++## Code changes to the bench harness (context for upstreaming)
++
++We made small, targeted improvements for repeatability and multi‑payload mixes:
++
++- `scripts/bench/run_window_bench.sh`
++  - Added `BENCH_PAYLOAD_PATH` (single) and `BENCH_PAYLOAD_PATHS` (comma‑separated) to select request bodies and copy them into the bench directory.
++  - Added `BENCH_ROOT` to write benchmarks directly under a provided path, bypassing manifest resolution (useful inside the helper container).
++  - CSV numeric extraction fix for DCGM/node metrics: pipe metric lines through `awk '{print $NF}'` to guarantee numeric fields in `samples.csv`.
++
++- `scripts/bench/http_bench.py`
++  - Added mutually exclusive `--body` (single) and `--bodies` (multi) flags; in multi mode, requests round‑robin the bodies list.
++  - Added `--outdir` (explicit), writes `meta_*.txt`, `out_*.json`, and a compact `http_summary.json` with `window_seconds`.
++  - Tightened aiohttp client behavior (timeouts, larger read buffer) for high‑concurrency windows.
++
++Upstream suitability:
++
++- The `http_bench.py --bodies` support and `--outdir` improvements are broadly useful and low‑risk to upstream as a focused PR.
++- The CSV numeric fix in the runner and the BENCH_ROOT/payload‑copy ergonomics are specific to this repo’s helper workflow but can be proposed as optional quality‑of‑life improvements.
++- A follow‑up improvement we’d propose upstream: in `bench_offline_throughput`, treat non‑JSON error responses as failures in aggregation instead of raising, and offer an explicit length guard for runtime backend to prevent context‑overflow requests.
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+index 60f68905e..bebaa2b23 100644
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -118,6 +118,20 @@ from sglang.srt.warmup import execute_warmups
+ from sglang.utils import get_exception_traceback
+ from sglang.version import __version__
+
++TRACE_PROBE_FILE = os.environ.get("TRACE_PROBE_FILE", "/telemetry/trace_probe.log")
++
++
++def _trace_probe(message: str) -> None:
++    if not message:
++        return
++    formatted = f"[{os.getpid()}] {message}\n"
++    try:
++        with open(TRACE_PROBE_FILE, "a", encoding="utf-8") as fp:
++            fp.write(formatted)
++    except Exception:
++        print(formatted.rstrip(), flush=True)
++
++
+ logger = logging.getLogger(__name__)
+ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+@@ -182,11 +196,57 @@ async def init_multi_tokenizer() -> ServerArgs:
+         )
+     )
+
++    _trace_probe(
++        f"init_multi_tokenizer enter enable_trace={server_args.enable_trace} SGL_DEBUG={os.environ.get('SGL_DEBUG')}"
++    )
++    logger.info(
++        "[trace_debug] http_worker_init enable_trace_flag=%s SGL_DEBUG=%s",
++        server_args.enable_trace,
++        os.environ.get("SGL_DEBUG"),
++    )
+     if server_args.enable_trace:
+-        process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+-        if server_args.disaggregation_mode == "null":
+-            thread_label = f"MultiTokenizer-{tokenizer_manager.worker_id}"
+-            trace_set_thread_info(thread_label)
++        _trace_probe(
++            f"init_multi_tokenizer calling process_tracing_init endpoint={server_args.oltp_traces_endpoint}"
++        )
++        if os.environ.get("SGL_DEBUG") == "1":
++            logger.info(
++                "[trace_debug] http_worker_init calling process_tracing_init endpoint=%s",
++                server_args.oltp_traces_endpoint,
++            )
++        try:
++            process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
++            try:
++                import sglang.srt.tracing.trace as _trace  # type: ignore
++
++                _trace_probe(
++                    f"init_multi_tokenizer init_success tracing_enabled={getattr(_trace, 'tracing_enabled', None)} threads={len(getattr(_trace, 'threads_info', {}))}"
++                )
++            except Exception:
++                _trace_probe(
++                    "init_multi_tokenizer init_success (trace module unavailable)"
++                )
++        except Exception as exc:
++            _trace_probe(f"init_multi_tokenizer init_error {exc!r}")
++            raise
++        thread_label = f"MultiTokenizer-{tokenizer_manager.worker_id}"
++        trace_set_thread_info(thread_label)
++        _trace_probe(f"init_multi_tokenizer trace_set_thread_info label={thread_label}")
++        # Optional init diagnostics
++        if os.environ.get("SGL_DEBUG") == "1":
++            try:
++                import sglang.srt.tracing.trace as _trace
++
++                pid = threading.get_native_id()
++                registered = pid in getattr(_trace, "threads_info", {})
++                logger.info(
++                    "[trace_debug] http_worker_init enable_trace=%s tracing_enabled=%s thread_registered=%s pid=%s",
++                    server_args.enable_trace,
++                    getattr(_trace, "tracing_enabled", False),
++                    registered,
++                    pid,
++                )
++            except Exception as _exc:  # pragma: no cover
++                logger.info("[trace_debug] http_worker_init diag error: %s", _exc)
+
+     return server_args
+
+@@ -276,6 +336,19 @@ async def lifespan(fast_api_app: FastAPI):
+     try:
+         yield
+     finally:
++        if server_args.enable_trace:
++            try:
++                from opentelemetry import trace as _otel_trace
++
++                provider = _otel_trace.get_tracer_provider()
++                shutdown = getattr(provider, "shutdown", None)
++                if callable(shutdown):
++                    shutdown()
++            except ImportError:
++                logger.debug("opentelemetry not installed; skipping tracer shutdown")
++            except Exception as exc:
++                logger.warning("Failed to shutdown tracer provider cleanly: %s", exc)
++
+         if server_args.tokenizer_worker_num > 1:
+             pid = os.getpid()
+             logger.info(f"uvicorn worker {pid} ending...")
+@@ -288,6 +361,28 @@ app = FastAPI(
+     lifespan=lifespan,
+     openapi_url=None if get_bool_env_var("DISABLE_OPENAPI_DOC") else "/openapi.json",
+ )
++
++
++# Add a simple probe endpoint to help trace debugging in CI/staging.
++@app.get("/trace_probe")
++async def trace_probe_state():
++    try:
++        import sglang.srt.tracing.trace as _trace  # type: ignore
++
++        enabled = getattr(_trace, "tracing_enabled", None)
++        threads = len(getattr(_trace, "threads_info", {}))
++    except Exception:
++        enabled = None
++        threads = None
++    return {
++        "pid": os.getpid(),
++        "tracing_enabled": enabled,
++        "threads_registered": threads,
++        "SGL_DEBUG": os.environ.get("SGL_DEBUG"),
++        "TRACE_PROBE_FILE": TRACE_PROBE_FILE,
++    }
++
++
+ app.add_middleware(
+     CORSMiddleware,
+     allow_origins=["*"],
+@@ -543,7 +638,7 @@ async def generate_request(obj: GenerateReqInput, request: Request):
+ async def generate_from_file_request(file: UploadFile, request: Request):
+     """Handle a generate request, this is purely to work with input_embeds."""
+     content = await file.read()
+-    input_embeds = json.loads(content.decode("utf-8"))
++    input_embeds = orjson.loads(content.decode("utf-8"))
+
+     obj = GenerateReqInput(
+         input_embeds=input_embeds,
+@@ -1255,11 +1350,59 @@ def launch_server(
+             server_args=server_args,
+         )
+
++        _trace_probe(
++            f"http_single_init branch reached enable_trace={server_args.enable_trace} SGL_DEBUG={os.environ.get('SGL_DEBUG')}"
++        )
++        logger.info(
++            "[trace_debug] http_single_init enable_trace_flag=%s SGL_DEBUG=%s",
++            server_args.enable_trace,
++            os.environ.get("SGL_DEBUG"),
++        )
+         if server_args.enable_trace:
+-            process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
++            _trace_probe(
++                f"http_single_init calling process_tracing_init endpoint={server_args.oltp_traces_endpoint}"
++            )
++            if os.environ.get("SGL_DEBUG") == "1":
++                logger.info(
++                    "[trace_debug] http_single_init calling process_tracing_init endpoint=%s",
++                    server_args.oltp_traces_endpoint,
++                )
++            try:
++                process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
++                try:
++                    import sglang.srt.tracing.trace as _trace  # type: ignore
++
++                    _trace_probe(
++                        f"http_single_init init_success tracing_enabled={getattr(_trace, 'tracing_enabled', None)} threads={len(getattr(_trace, 'threads_info', {}))}"
++                    )
++                except Exception:
++                    _trace_probe(
++                        "http_single_init init_success (trace module unavailable)"
++                    )
++            except Exception as exc:
++                _trace_probe(f"http_single_init init_error {exc!r}")
++                raise
+             if server_args.disaggregation_mode == "null":
+                 thread_label = "Tokenizer"
+                 trace_set_thread_info(thread_label)
++                _trace_probe(
++                    f"http_single_init trace_set_thread_info label={thread_label}"
++                )
++            if os.environ.get("SGL_DEBUG") == "1":
++                try:
++                    import sglang.srt.tracing.trace as _trace
++
++                    pid = threading.get_native_id()
++                    registered = pid in getattr(_trace, "threads_info", {})
++                    logger.info(
++                        "[trace_debug] http_single_init enable_trace=%s tracing_enabled=%s thread_registered=%s pid=%s",
++                        server_args.enable_trace,
++                        getattr(_trace, "tracing_enabled", False),
++                        registered,
++                        pid,
++                    )
++                except Exception as _exc:  # pragma: no cover
++                    logger.info("[trace_debug] http_single_init diag error: %s", _exc)
+
+     set_global_state(
+         _GlobalState(
+diff --git a/python/sglang/srt/eplb/expert_distribution.py b/python/sglang/srt/eplb/expert_distribution.py
+index 3faf981ef..86dda14ae 100644
+--- a/python/sglang/srt/eplb/expert_distribution.py
++++ b/python/sglang/srt/eplb/expert_distribution.py
+@@ -30,6 +30,8 @@ import torch.distributed
+
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+ from sglang.srt.server_args import ServerArgs
++from sglang.srt.trace import ExpertTraceWriter
++from sglang.srt.trace.expert_trace import get_expert_trace_writer
+ from sglang.srt.utils import Withable, get_bool_env_var, is_npu
+
+ _is_npu = is_npu()
+@@ -144,6 +146,10 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+             for k in self._accumulator.get_single_pass_gatherer_keys()
+         }
+
++        self._expert_trace_writer: Optional[ExpertTraceWriter] = (
++            get_expert_trace_writer()
++        )
++
+         if server_args.enable_expert_distribution_metrics:
+             logger.info(
+                 "ExpertDistributionRecorder auto start record since enable_expert_distribution_metrics"
+@@ -176,6 +182,13 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+             self._disable_all = previous_disable_all
+
+     def _on_forward_pass_start(self, forward_batch: ForwardBatch):
++        if self._expert_trace_writer:
++            step_id = self._current_forward_pass_id.value
++            if step_id is not None:
++                self._expert_trace_writer.on_forward_pass_start(
++                    step_id, forward_batch
++                )
++
+         if not self._recording:
+             return
+         for gatherer_key, gatherer in self._single_pass_gatherers.items():
+@@ -184,10 +197,14 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+
+     def _on_forward_pass_end(self, forward_pass_id: int):
+         if not self._recording:
++            if self._expert_trace_writer:
++                self._expert_trace_writer.on_forward_pass_end(forward_pass_id)
+             return
+         for gatherer_key, gatherer in self._single_pass_gatherers.items():
+             single_pass_data = gatherer.collect()
+             self._accumulator.append(forward_pass_id, gatherer_key, single_pass_data)
++        if self._expert_trace_writer:
++            self._expert_trace_writer.on_forward_pass_end(forward_pass_id)
+
+     def on_select_experts(self, topk_ids: torch.Tensor):
+         self._on_hook("on_select_experts", topk_ids=topk_ids)
+@@ -218,16 +235,36 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+     def _on_hook(self, hook_name: str, **kwargs):
+         if self._disable_all:
+             return
+-        if not (
++
++        should_run_gatherer = (
+             self._recording or torch.get_device_module().is_current_stream_capturing()
+-        ):
+-            return
+-        gatherer = self._single_pass_gatherers[
+-            self._accumulator.get_single_pass_gatherer_key(
+-                self._current_debug_name.value
++        )
++
++        if should_run_gatherer:
++            gatherer = self._single_pass_gatherers[
++                self._accumulator.get_single_pass_gatherer_key(
++                    self._current_debug_name.value
++                )
++            ]
++            getattr(gatherer, hook_name)(
++                layer_idx=self._current_layer_idx.value, **kwargs
+             )
+-        ]
+-        getattr(gatherer, hook_name)(layer_idx=self._current_layer_idx.value, **kwargs)
++
++        if self._expert_trace_writer and hook_name == "on_select_experts":
++            step_id = self._current_forward_pass_id.value
++            layer_idx = self._current_layer_idx.value
++
++            ids_tensor = kwargs.get("topk_ids")
++            ids_kind = "topk_ids" if ids_tensor is not None else "unknown"
++            if ids_tensor is None:
++                ids_tensor = kwargs.get("topk_idx")
++                if ids_tensor is not None:
++                    ids_kind = "topk_idx"
++
++            if step_id is not None and layer_idx is not None and ids_tensor is not None:
++                self._expert_trace_writer.handle_on_select_experts(
++                    step_id, layer_idx, ids_tensor, ids_kind
++                )
+
+     def _reset(self):
+         """Reset the expert distribution recorder."""
+@@ -238,6 +275,8 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+         for gatherer in self._single_pass_gatherers.values():
+             gatherer.reset()
+         self._accumulator.reset()
++        if self._expert_trace_writer:
++            self._expert_trace_writer.reset()
+
+     def start_record(self):
+         """Start recording the expert distribution."""
+@@ -247,6 +286,8 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+             )
+         self._reset()
+         self._recording = True
++        if self._expert_trace_writer:
++            self._expert_trace_writer.start_record()
+
+     def stop_record(self):
+         """Stop recording the expert distribution."""
+@@ -255,11 +296,21 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+                 "SGLang server has not been recording expert ids. Did you forget to start recording by sending request to the `/start_expert_distribution_record` endpoint?"
+             )
+         self._recording = False
++        if self._expert_trace_writer:
++            self._expert_trace_writer.stop_record()
+
+     def dump_record(self, output_mode: _OutputMode = "file"):
+         """Dump the expert distribution record and reset the recorder after dumping."""
+         output = self._accumulator.dump(output_mode=output_mode)
++        trace_files: List[str] = []
++        if self._expert_trace_writer:
++            trace_files = self._expert_trace_writer.flush(reason="dump_record")
+         self._reset()
++        if output_mode == "file" and trace_files:
++            # include trace paths for caller visibility
++            output = output or {}
++            output.setdefault("metadata", {})
++            output["metadata"]["expert_trace_files"] = trace_files
+         return output
+
+     @property
+@@ -349,8 +400,9 @@ class _SinglePassGatherer(ABC):
+
+
+ class _DetailSinglePassGatherer(_SinglePassGatherer):
+-    # DeepSeek V3 has this value; should generalize later
+-    _TOP_K_NUM = 8
++    # Default top-k experts recorded per token. Qwen3‑Next uses 10.
++    # TODO: generalize to derive from model config or router at runtime.
++    _TOP_K_NUM = 10
+
+     def __init__(
+         self,
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton.py b/python/sglang/srt/layers/moe/moe_runner/triton.py
+index 116fdcaa0..676a0f857 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/triton.py
++++ b/python/sglang/srt/layers/moe/moe_runner/triton.py
+@@ -19,6 +19,10 @@ from sglang.srt.layers.moe.moe_runner.base import (
+     register_pre_permute,
+ )
+ from sglang.srt.layers.moe.utils import MoeRunnerBackend
++from sglang.srt.eplb.expert_distribution import (
++    get_global_expert_distribution_recorder,
++)
++from sglang.srt.utils import get_bool_env_var
+ from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip
+
+ if TYPE_CHECKING:
+@@ -126,6 +130,16 @@ class TritonRunnerCore(MoeRunnerCore):
+         expert_ids = runner_input.expert_ids
+         num_tokens_post_padded = runner_input.num_tokens_post_padded
+
++        # Optional: emit per-token expert ids for tracing (covers decode under Triton path)
++        try:
++            if get_bool_env_var("SGLANG_MOE_TRACE_DECODE_FROM_RUNNER"):
++                rec = get_global_expert_distribution_recorder()
++                # Use recorder's hook to preserve step/layer context when available
++                rec.on_select_experts(topk_ids=topk_ids)
++        except Exception:
++            # Tracing is best-effort; never break execution
++            pass
++
+         w13 = quant_info.w13_weight
+         w2 = quant_info.w2_weight
+         b13 = quant_info.b13
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/deepep.py b/python/sglang/srt/layers/moe/token_dispatcher/deepep.py
+index 5e980f472..fa60ecd3e 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/deepep.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/deepep.py
+@@ -15,6 +15,7 @@ from sglang.srt.layers.moe.token_dispatcher.base import (
+     DispatchOutputFormat,
+ )
+ from sglang.srt.layers.moe.utils import DeepEPMode, get_deepep_config, is_tbo_enabled
++from sglang.srt.utils import get_bool_env_var
+ from sglang.srt.layers.quantization import deep_gemm_wrapper
+ from sglang.srt.utils import (
+     get_bool_env_var,
+@@ -361,6 +362,15 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
+             event,
+         ) = self._dispatch_core(hidden_states, topk_idx, topk_weights, previous_event)
+         event.current_stream_wait() if self.async_finish else ()
++        # Optional post-dispatch emit of per-token expert ids for tracing (decode-safe)
++        try:
++            if get_bool_env_var("SGLANG_MOE_TRACE_FROM_DISPATCH"):
++                get_global_expert_distribution_recorder().on_select_experts(
++                    topk_ids=topk_idx
++                )
++        except Exception:
++            # Best-effort tracing; never break dispatch
++            pass
+         return DeepEPNormalOutput(
+             hidden_states, topk_idx, topk_weights, num_recv_tokens_per_expert
+         )
+@@ -555,6 +565,15 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
+             masked_m
+         )
+
++        # Optional post-dispatch emit (low-latency path)
++        try:
++            if get_bool_env_var("SGLANG_MOE_TRACE_FROM_DISPATCH"):
++                get_global_expert_distribution_recorder().on_select_experts(
++                    topk_ids=topk_idx
++                )
++        except Exception:
++            pass
++
+         deepep_output = DeepEPLLOutput(
+             hidden_states,
+             topk_idx,
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/standard.py b/python/sglang/srt/layers/moe/token_dispatcher/standard.py
+index f984104f6..3c9dfdcb8 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/standard.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/standard.py
+@@ -11,6 +11,10 @@ from sglang.srt.layers.moe.token_dispatcher.base import (
+     DispatchOutput,
+     DispatchOutputFormat,
+ )
++from sglang.srt.eplb.expert_distribution import (
++    get_global_expert_distribution_recorder,
++)
++from sglang.srt.utils import get_bool_env_var
+
+ if TYPE_CHECKING:
+     from sglang.srt.layers.moe.topk import TopKOutput
+@@ -48,6 +52,14 @@ class StandardDispatcher(BaseDispatcher):
+     def dispatch(
+         self, hidden_states: torch.Tensor, topk_output: TopKOutput
+     ) -> DispatchOutput:
++        # Optional: emit per-token expert ids when EP=1/standard path, gated by env
++        try:
++            if get_bool_env_var("SGLANG_MOE_TRACE_FROM_DISPATCH"):
++                rec = get_global_expert_distribution_recorder()
++                rec.on_select_experts(topk_ids=topk_output.topk_ids)
++        except Exception:
++            pass
++
+         return StandardDispatchOutput(
+             hidden_states=hidden_states, topk_output=topk_output
+         )
+diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
+index 9af3b8a2b..ad93f2253 100644
+--- a/python/sglang/srt/layers/moe/topk.py
++++ b/python/sglang/srt/layers/moe/topk.py
+@@ -252,7 +252,11 @@ class TopK(CustomOp):
+         num_token_non_padded: Optional[torch.Tensor] = None,
+         expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
+     ) -> TopKOutput:
+-        if self.topk_config.output_format is not None:
++        # Allow forcing STANDARD output format to guarantee on_select_experts hooks fire
++        force_standard = get_bool_env_var("SGLANG_FORCE_STANDARD_TOPK")
++        if force_standard:
++            output_format = TopKOutputFormat.STANDARD
++        elif self.topk_config.output_format is not None:
+             output_format = self.topk_config.output_format
+         elif get_moe_runner_backend().is_triton_kernel():
+             output_format = TopKOutputFormat.TRITON_KERNEL
+diff --git a/python/sglang/srt/models/qwen3_moe.py b/python/sglang/srt/models/qwen3_moe.py
+index c4842416c..1b9974c75 100644
+--- a/python/sglang/srt/models/qwen3_moe.py
++++ b/python/sglang/srt/models/qwen3_moe.py
+@@ -227,6 +227,15 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
+                         layer_id=self.layer_id,
+                     ),
+                 )
++                # Optional force-emit for tracing to cover decode paths
++                try:
++                    import os
++                    if os.getenv("SGLANG_MOE_TRACE_FORCE_EMIT", "0").lower() not in ("0", "false", "no"):
++                        get_global_expert_distribution_recorder().on_select_experts(
++                            topk_ids=state.topk_idx_local
++                        )
++                except Exception:
++                    pass
+         else:
+             state.topk_idx_local = torch.full(
+                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
+diff --git a/scripts/infer/start_server.sh b/scripts/infer/start_server.sh
+new file mode 100755
+index 000000000..aa450a5c6
+--- /dev/null
++++ b/scripts/infer/start_server.sh
+@@ -0,0 +1,434 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Starts sglang.launch_server inside the running container as devuser.
++# Emits a small JSON with run_id, health, port, manifest_host_path, log_file, started_at_iso.
++
++CONTAINER_NAME="${CONTAINER_NAME:-sglang-dev}"
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++HOST_OBS_ROOT="${HOST_OBS_ROOT:-$HOME/sglang-observability}"
++RUN_META_FILE="${HOST_OBS_ROOT}/telemetry/container_run_meta.env"
++HOST_PORT="${PORT:-30000}"
++TP_SIZE="${TP:-1}"
++
++# Optional overrides (otherwise read from sglang-config.json in container)
++MODEL_PATH="${MODEL_PATH:-}"
++KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
++MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-}"
++CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-}"
++CONTEXT_LENGTH="${CONTEXT_LENGTH:-}"
++MAX_PREFILL_TOKENS="${MAX_PREFILL_TOKENS:-}"
++MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-}"
++MAX_MAMBA_CACHE_SIZE="${MAX_MAMBA_CACHE_SIZE:-}"
++# Optional tracing toggles
++ENABLE_TRACE="${ENABLE_TRACE:-}"
++OLTP_TRACES_ENDPOINT="${OLTP_TRACES_ENDPOINT:-}"
++# Optional OTEL sampler (propagated to container if provided)
++OTEL_TRACES_SAMPLER="${OTEL_TRACES_SAMPLER:-}"
++# Optional debug toggle passed into containerized server
++SGL_DEBUG="${SGL_DEBUG:-}"
++PYTHON_BIN="${PYTHON_BIN:-/sgl-workspace/sglang/.venv/bin/python}"
++
++now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
++die() { echo "ERROR: $*" >&2; exit 1; }
++
++emit_ready_json() {
++  python3 - "$@" <<'PY'
++import json, sys
++import os
++import tempfile
++import io
++import errno
++(
++    started_at,
++    run_id,
++    session_id,
++    port,
++    manifest_path,
++    log_file,
++    session_record_path,
++    tp_size,
++    mem,
++    chunk,
++    ctx,
++    maxp,
++    maxt,
++    mamba,
++) = sys.argv[1:]
++
++def maybe_number(value: str):
++    if not value:
++        return None
++    try:
++        if "." in value:
++            return float(value)
++        return int(value)
++    except ValueError:
++        return value
++
++out = {
++    "schema_version": 1,
++    "run_id": run_id,
++    "server_session_id": session_id,
++    "health": "ready",
++    "port": int(port),
++    "manifest_host_path": manifest_path,
++    "log_file": log_file,
++    "started_at_iso": started_at,
++    "session_record_host_path": session_record_path,
++    "sizing": {
++        "tp_size": int(tp_size),
++        "mem_fraction_static": maybe_number(mem),
++        "chunked_prefill_size": maybe_number(chunk),
++        "context_length": maybe_number(ctx),
++        "max_prefill_tokens": maybe_number(maxp),
++        "max_total_tokens": maybe_number(maxt),
++        "max_mamba_cache_size": maybe_number(mamba),
++    },
++}
++json_str = json.dumps(out)
++print(json_str)
++if session_record_path:
++    from pathlib import Path
++    path = Path(session_record_path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    # Atomic write: tmp file in same directory, fsync file then rename, fsync dir
++    tmp = None
++    try:
++        fd, tmp_name = tempfile.mkstemp(prefix='.start.', suffix='.json.tmp', dir=str(path.parent))
++        tmp = tmp_name
++        with io.open(fd, 'w', encoding='utf-8', closefd=False) as fh:
++            fh.write(json_str + "\n")
++            fh.flush()
++            os.fsync(fh.fileno())
++        os.replace(tmp_name, str(path))
++        # Fsync the directory to ensure rename is durable
++        dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
++        try:
++            os.fsync(dir_fd)
++        finally:
++            os.close(dir_fd)
++    finally:
++        if tmp and os.path.exists(tmp):
++            try:
++                os.unlink(tmp)
++            except OSError:
++                pass
++PY
++}
++
++[ -f "$RUN_META_FILE" ] || die "manifest pointer not found: $RUN_META_FILE (start the container first)"
++
++MANIFEST_HOST=$(awk -F= '/^CONTAINER_RUN_META_JSON_HOST=/{print $2}' "$RUN_META_FILE" || true)
++[ -n "$MANIFEST_HOST" ] || die "host manifest path missing in pointer"
++[ -f "$MANIFEST_HOST" ] || die "host manifest not found: $MANIFEST_HOST"
++
++RUN_ID=$(python3 - "$MANIFEST_HOST" <<'PY'
++import json,sys
++p=sys.argv[1]
++d=json.load(open(p))
++print((d.get('run') or {}).get('container_run_id') or d.get('container_run_id') or '')
++PY
++)
++[ -n "$RUN_ID" ] || die "container_run_id missing in manifest"
++
++LOG_FILE=$(python3 - "$MANIFEST_HOST" <<'PY'
++import json,sys
++p=sys.argv[1]
++d=json.load(open(p))
++print(((d.get('storage') or {}).get('log_file')) or '')
++PY
++)
++[ -n "$LOG_FILE" ] || die "log file missing in manifest"
++
++HOST_LOG_FILE=$(python3 - "$MANIFEST_HOST" <<'PY'
++import json,sys
++p=sys.argv[1]
++d=json.load(open(p))
++paths = d.get('paths') or {}
++host_paths = paths.get('host') if isinstance(paths.get('host'), dict) else {}
++print(host_paths.get('log_file', ''))
++PY
++)
++
++RUN_DIR_HOST=$(python3 - "$MANIFEST_HOST" <<'PY'
++import json,sys
++p=sys.argv[1]
++d=json.load(open(p))
++paths = d.get('paths') or {}
++host_paths = paths.get('host') if isinstance(paths.get('host'), dict) else {}
++print(host_paths.get('run_dir', ''))
++PY
++)
++
++if [ -z "$RUN_DIR_HOST" ] && [ -n "$HOST_LOG_FILE" ]; then
++  RUN_DIR_HOST="$(cd "$(dirname "$HOST_LOG_FILE")"/.. && pwd)"
++fi
++
++SERVER_SESSION_ID=$(python3 - <<'PY'
++import uuid
++print("srv-" + uuid.uuid4().hex)
++PY
++)
++
++SESSION_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
++if [ -n "$RUN_DIR_HOST" ]; then
++  SESSION_RECORD_HOST_PATH="${RUN_DIR_HOST%/}/logs/provider_sessions/${SESSION_TIMESTAMP}_${SERVER_SESSION_ID}/start.json"
++else
++  SESSION_RECORD_HOST_PATH=""
++fi
++
++if [ -n "$HOST_LOG_FILE" ]; then
++  printf '[%s] server session start: id=%s tp=%s mem=%s chunk=%s ctx=%s maxp=%s maxt=%s max_mamba=%s session_record=%s\n' "$(now_iso)" "$SERVER_SESSION_ID" "$TP_SIZE" "${MEM:-}" "${CHUNK:-}" "${CTX:-}" "${MAXP:-}" "${MAXT:-}" "${MAMBA:-}" "$SESSION_RECORD_HOST_PATH" >> "$HOST_LOG_FILE" || true
++fi
++
++# If healthy already, print status and exit
++if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
++  existing_session="unknown"
++  if [ -n "$RUN_DIR_HOST" ]; then
++    latest_start_json=$(ls -1 "$RUN_DIR_HOST"/logs/provider_sessions/*/start.json 2>/dev/null | sort | tail -n1 || true)
++    if [ -n "$latest_start_json" ]; then
++      candidate=$(python3 - "$latest_start_json" <<'PY'
++import json, sys
++try:
++    with open(sys.argv[1]) as f:
++        data = json.load(f)
++    print(data.get("server_session_id", ""))
++except Exception:
++    pass
++PY
++)
++      if [ -n "$candidate" ]; then existing_session="$candidate"; fi
++    fi
++  fi
++  if [ "$existing_session" = "unknown" ] && [ -n "$HOST_LOG_FILE" ] && [ -f "$HOST_LOG_FILE" ]; then
++    candidate=$(grep 'server session start:' "$HOST_LOG_FILE" | tail -n1 | sed -n 's/.*id=\([^ ]*\).*/\1/p')
++    if [ -n "$candidate" ]; then existing_session="$candidate"; fi
++  fi
++  die "server already running (session=$existing_session). stop it first before starting a new session"
++fi
++
++# Build server flags by reading the config inside the container unless overrides are provided
++read_cfg_py='"'"${PYTHON_BIN}"'" - <<PY
++import json, os
++cfg = json.load(open("/sgl-workspace/sglang/.devcontainer/tools/sglang-config.json"))
++model = os.environ.get("MODEL_PATH") or (cfg.get("model") or {}).get("default_model_path")
++server_cfg = cfg.get("server") or {}
++print(json.dumps({
++  "model": model,
++  "kv": os.environ.get("KV_CACHE_DTYPE") or (cfg.get("model") or {}).get("kv_cache_dtype"),
++  "mem": os.environ.get("MEM_FRACTION_STATIC") or server_cfg.get("mem_fraction_static"),
++  "chunk": os.environ.get("CHUNKED_PREFILL_SIZE") or server_cfg.get("chunked_prefill_size"),
++  "ctx": os.environ.get("CONTEXT_LENGTH") or server_cfg.get("context_length"),
++  "maxp": os.environ.get("MAX_PREFILL_TOKENS") or server_cfg.get("max_prefill_tokens"),
++  "maxt": os.environ.get("MAX_TOTAL_TOKENS") or server_cfg.get("max_total_tokens"),
++  "mamba": os.environ.get("MAX_MAMBA_CACHE_SIZE") or server_cfg.get("max_mamba_cache_size"),
++  "trace": os.environ.get("ENABLE_TRACE") or server_cfg.get("enable_trace"),
++  "otlp": os.environ.get("OLTP_TRACES_ENDPOINT") or server_cfg.get("oltp_traces_endpoint"),
++}))
++PY
++'
++
++read_cfg() {
++  docker exec -u devuser \
++    -e MODEL_PATH="$MODEL_PATH" \
++    -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
++    -e MEM_FRACTION_STATIC="$MEM_FRACTION_STATIC" \
++    -e CHUNKED_PREFILL_SIZE="$CHUNKED_PREFILL_SIZE" \
++    -e CONTEXT_LENGTH="$CONTEXT_LENGTH" \
++    -e MAX_PREFILL_TOKENS="$MAX_PREFILL_TOKENS" \
++    -e MAX_TOTAL_TOKENS="$MAX_TOTAL_TOKENS" \
++    -e MAX_MAMBA_CACHE_SIZE="$MAX_MAMBA_CACHE_SIZE" \
++    -e ENABLE_TRACE="$ENABLE_TRACE" \
++    -e OLTP_TRACES_ENDPOINT="$OLTP_TRACES_ENDPOINT" \
++    "$CONTAINER_NAME" bash -lc "$read_cfg_py" 2>/dev/null || echo '{}'
++}
++
++cfg_json=$(MODEL_PATH="$MODEL_PATH" KV_CACHE_DTYPE="$KV_CACHE_DTYPE" MEM_FRACTION_STATIC="$MEM_FRACTION_STATIC" CHUNKED_PREFILL_SIZE="$CHUNKED_PREFILL_SIZE" CONTEXT_LENGTH="$CONTEXT_LENGTH" MAX_PREFILL_TOKENS="$MAX_PREFILL_TOKENS" MAX_TOTAL_TOKENS="$MAX_TOTAL_TOKENS" MAX_MAMBA_CACHE_SIZE="$MAX_MAMBA_CACHE_SIZE" ENABLE_TRACE="$ENABLE_TRACE" OLTP_TRACES_ENDPOINT="$OLTP_TRACES_ENDPOINT" read_cfg)
++
++val() { python3 - "$@" << 'PY'
++import json,sys
++print((json.loads(sys.argv[1]).get(sys.argv[2]) or ""))
++PY
++}
++
++MODEL=$(val "$cfg_json" model)
++# Fallback: read model path from host-side config if container read failed
++if [ -z "$MODEL" ]; then
++  HOST_CFG_PATH="${SCRIPT_DIR%/}/../../.devcontainer/tools/sglang-config.json"
++  if [ -f "$HOST_CFG_PATH" ]; then
++    MODEL=$(python3 - "$HOST_CFG_PATH" <<'PY'
++import json, os, sys
++p=sys.argv[1]
++try:
++    d=json.load(open(p))
++    print(os.environ.get("MODEL_PATH") or (d.get("model") or {}).get("default_model_path") or "")
++except Exception:
++    print("")
++PY
++)
++    if [ -n "$MODEL" ] && [ -n "$HOST_LOG_FILE" ]; then
++      printf '[%s] fallback: using host config model path: %s\n' "$(now_iso)" "$MODEL" >> "$HOST_LOG_FILE" || true
++    fi
++  fi
++fi
++[ -n "$MODEL" ] || die "MODEL_PATH not provided and default not found"
++KV=$(val "$cfg_json" kv)
++MEM=$(val "$cfg_json" mem)
++CHUNK=$(val "$cfg_json" chunk)
++CTX=$(val "$cfg_json" ctx)
++MAXP=$(val "$cfg_json" maxp)
++MAXT=$(val "$cfg_json" maxt)
++MAMBA=$(val "$cfg_json" mamba)
++TRACE=$(val "$cfg_json" trace)
++OTLP=$(val "$cfg_json" otlp)
++MODEL_SLUG="$(basename "$MODEL")"
++
++if [ -z "$OTLP" ]; then
++  OTLP="127.0.0.1:4317"
++fi
++
++# Resource attributes for tracing:
++# - container_run identifies the helper container run (low cardinality)
++# - service.instance.id is the authoritative session identifier for filtering
++#   in Jaeger; do not also add a duplicate server_session_id resource attribute.
++BASE_OTEL_ATTRS="container_run=$RUN_ID,service.instance.id=$SERVER_SESSION_ID"
++if [ -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]; then
++  OTEL_ATTRS="${OTEL_RESOURCE_ATTRIBUTES},${BASE_OTEL_ATTRS}"
++else
++  OTEL_ATTRS="$BASE_OTEL_ATTRS"
++fi
++# NOTE: upstream uses OLTP_TRACES_ENDPOINT spelling; keep matching their env contract
++# even though local variable is OTLP (OpenTelemetry Protocol).
++
++TRACE_STATE="disabled"
++if [ -n "$TRACE" ]; then
++  TRACE_STATE="enabled"
++fi
++
++# GPU preflight via venv interpreter (fail fast)
++docker exec -u devuser "$CONTAINER_NAME" bash -lc "\
++  set -e; "$PYTHON_BIN" - <<'PY'
++import sys
++try:
++    import torch
++    ok = bool(torch.cuda.is_available()) and (getattr(torch.version, 'cuda', None) == '12.9')
++    if not ok:
++        raise SystemExit(2)
++except Exception as e:
++    print('ERROR: CUDA preflight failed:', e, file=sys.stderr)
++    raise SystemExit(1)
++PY" || die "venv CUDA preflight failed"
++
++
++docker exec -u devuser \
++  -e SGL_DEBUG="$SGL_DEBUG" \
++  -e OTEL_TRACES_SAMPLER="$OTEL_TRACES_SAMPLER" \
++  "$CONTAINER_NAME" bash -lc "bash /sgl-workspace/sglang/.devcontainer/observability/eventlog.sh event sglang_trace_config run_id=\"$RUN_ID\" server_session_id=\"$SERVER_SESSION_ID\" trace=$TRACE_STATE otlp=\"$OTLP\" otel_attrs=\"$OTEL_ATTRS\" || true" >/dev/null
++
++if [ -n "$HOST_LOG_FILE" ]; then
++  printf '[%s] tracing config: trace=%s otlp=%s server_session_id=%s otel_attrs="%s"\n' "$(now_iso)" "$TRACE_STATE" "$OTLP" "$SERVER_SESSION_ID" "$OTEL_ATTRS" >> "$HOST_LOG_FILE" || true
++fi
++
++# Start server in the container (avoid Bash @Q quoting; pass env vars instead)
++# Persist caches into /profiles mounts for the main server as well
++# Fail fast: ensure DeepGEMM cache dir is writable inside the container
++docker exec -u devuser "$CONTAINER_NAME" bash -lc 'test -d /profiles/deep_gemm -a -w /profiles/deep_gemm' \
++  || die "SGL_DG_CACHE_DIR (/profiles/deep_gemm) missing or not writable in container"
++
++docker exec -u devuser \
++  -e MODEL="$MODEL" \
++  -e MEM="$MEM" \
++  -e KV="$KV" \
++  -e CHUNK="$CHUNK" \
++  -e CTX="$CTX" \
++  -e MAXP="$MAXP" \
++  -e MAXT="$MAXT" \
++  -e MAMBA="$MAMBA" \
++  -e TRACE="$TRACE" \
++  -e OTLP="$OTLP" \
++  -e OTEL_TRACES_SAMPLER="$OTEL_TRACES_SAMPLER" \
++  -e SGL_DEBUG="$SGL_DEBUG" \
++  -e SGLANG_MOE_TRACE_DIR="$SGLANG_MOE_TRACE_DIR" \
++  -e SGLANG_MOE_TRACE_PHASE="$SGLANG_MOE_TRACE_PHASE" \
++  -e SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC="$SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC" \
++  -e SGLANG_FORCE_STANDARD_TOPK="$SGLANG_FORCE_STANDARD_TOPK" \
++  -e SGLANG_MOE_TRACE_FROM_DISPATCH="$SGLANG_MOE_TRACE_FROM_DISPATCH" \
++  -e EXPERT_DISTRIBUTION_RECORDER_MODE="$EXPERT_DISTRIBUTION_RECORDER_MODE" \
++  -e OTEL_RESOURCE_ATTRIBUTES="$OTEL_ATTRS" \
++  -e SGL_CONTAINER_RUN_ID="$RUN_ID" \
++  -e SGL_SERVER_SESSION_ID="$SERVER_SESSION_ID" \
++  -e TRITON_CACHE_DIR="/profiles/triton" \
++  -e TORCHINDUCTOR_CACHE_DIR="/profiles/torchinductor" \
++  -e FLASHINFER_WORKSPACE_DIR="/profiles/flashinfer" \
++  -e FLASHINFER_JIT_LOG_DIR="/profiles/flashinfer/90a" \
++  -e SGL_DG_CACHE_DIR="/profiles/deep_gemm" \
++  -e SGLANG_MOE_CONFIG_DIR="/profiles/moe_configs" \
++  -e LOG_FILE="$LOG_FILE" \
++  -e PYTHON_BIN="$PYTHON_BIN" \
++  "$CONTAINER_NAME" bash -lc "\
++  bash /sgl-workspace/sglang/.devcontainer/observability/eventlog.sh event sglang_started run_id=\"$RUN_ID\" server_session_id=\"$SERVER_SESSION_ID\" model_slug=\"$MODEL_SLUG\" tp=\"$TP_SIZE\" kv_cache_dtype=\"$KV\" || true; \
++  echo '[trace_debug] SGLANG_MOE_TRACE_DIR='\"$SGLANG_MOE_TRACE_DIR\"' SGLANG_MOE_TRACE_PHASE='\"$SGLANG_MOE_TRACE_PHASE\"' SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC='\"$SGLANG_MOE_TRACE_FLUSH_INTERVAL_SEC\" >> \"$LOG_FILE\"; \
++  PY_BIN=\"${PYTHON_BIN}\"; \
++  nohup \"\$PY_BIN\" -m sglang.launch_server \\
++    --model-path \"\$MODEL\" \\
++    --host 0.0.0.0 --port $HOST_PORT \\
++    --tp-size $TP_SIZE \\
++    \${MEM:+--mem-fraction-static \"\$MEM\"} \\
++    \${KV:+--kv-cache-dtype \"\$KV\"} \\
++    \${CHUNK:+--chunked-prefill-size \"\$CHUNK\"} \\
++    \${CTX:+--context-length \"\$CTX\"} \\
++    \${MAXP:+--max-prefill-tokens \"\$MAXP\"} \\
++    \${MAXT:+--max-total-tokens \"\$MAXT\"} \\
++    \${MAMBA:+--max-mamba-cache-size \"\$MAMBA\"} \\
++    \${TRACE:+--enable-trace} \\
++    \${OTLP:+--oltp-traces-endpoint \"\$OTLP\"} \\
++    --enable-metrics --trust-remote-code \\
++    \${EXPERT_DISTRIBUTION_RECORDER_MODE:+--expert-distribution-recorder-mode \"$EXPERT_DISTRIBUTION_RECORDER_MODE\"} \\
++    \${SGLANG_EXTRA_ARGS:+$SGLANG_EXTRA_ARGS} \\
++    >> \"\$LOG_FILE\" 2>&1 & disown" >/dev/null
++
++# Poll readiness (configurable, default 180s)
++READY_TIMEOUT=${READY_TIMEOUT:-180}
++deadline=$((SECONDS+READY_TIMEOUT))
++while [ $SECONDS -lt $deadline ]; do
++  if "$SCRIPT_DIR/status.sh" | grep -qx ready; then
++    probe_json=$(curl -fsS --max-time 10 "http://127.0.0.1:${HOST_PORT}/trace_probe" 2>/dev/null || true)
++    if [ -z "$probe_json" ]; then
++      die "trace probe endpoint unavailable on port ${HOST_PORT}"
++    fi
++    if ! python3 - "$probe_json" <<'PY'; then
++import json
++import sys
++
++data = json.loads(sys.argv[1])
++enabled = data.get("tracing_enabled")
++threads = data.get("threads_registered")
++if enabled not in (True, 1, "true") or not threads:
++    raise SystemExit(1)
++PY
++      die "trace probe endpoint reported tracing disabled"
++    fi
++    # Emit sglang_ready event and optional hello-world tick
++    docker exec -u devuser -e OTEL_TRACES_SAMPLER="$OTEL_TRACES_SAMPLER" -e SGL_DEBUG="$SGL_DEBUG" "$CONTAINER_NAME" bash -lc \
++      "bash /sgl-workspace/sglang/.devcontainer/observability/eventlog.sh event sglang_ready run_id=\"$RUN_ID\" server_session_id=\"$SERVER_SESSION_ID\" model_slug=\"$MODEL_SLUG\" tp=\"$TP_SIZE\" kv_cache_dtype=\"$KV\" || true"
++    if [ "${HELLO_AFTER_READY:-}" = "1" ]; then
++      docker exec -u devuser "$CONTAINER_NAME" bash -lc \
++        'bash /sgl-workspace/sglang/scripts/infer/hello_world.sh 127.0.0.1 '"$HOST_PORT"' || true'
++    fi
++    STARTED_AT_ISO="$(now_iso)"
++    emit_ready_json "$STARTED_AT_ISO" "$RUN_ID" "$SERVER_SESSION_ID" "$HOST_PORT" "$MANIFEST_HOST" "$LOG_FILE" "$SESSION_RECORD_HOST_PATH" "$TP_SIZE" "$MEM" "$CHUNK" "$CTX" "$MAXP" "$MAXT" "$MAMBA"
++    if [ -n "$HOST_LOG_FILE" ]; then
++      printf '[%s] sglang server ready: session=%s port=%s manifest=%s session_record=%s\n' "$STARTED_AT_ISO" "$SERVER_SESSION_ID" "$HOST_PORT" "$MANIFEST_HOST" "$SESSION_RECORD_HOST_PATH" >> "$HOST_LOG_FILE" || true
++    fi
++    exit 0
++  fi
++  sleep 1
++done
++
++echo "ERROR: server did not become ready on port $HOST_PORT within $READY_TIMEOUT seconds" >&2
++if [ -n "$LOG_FILE" ] && docker exec -u devuser "$CONTAINER_NAME" bash -lc "test -f \"$LOG_FILE\""; then
++  echo "--- tail of server log ($LOG_FILE) ---" >&2
++  docker exec -u devuser "$CONTAINER_NAME" bash -lc "tail -n 200 \"$LOG_FILE\"" >&2 || true
++fi
++die "server did not become ready on port $HOST_PORT"
+diff --git a/scripts/start_observable_container.sh b/scripts/start_observable_container.sh
+new file mode 100755
+index 000000000..d122d40ba
+--- /dev/null
++++ b/scripts/start_observable_container.sh
+@@ -0,0 +1,376 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Location of this script and repo root
++# Simple help and arg handling
++for arg in "$@"; do
++  case "$arg" in
++    -h|--help)
++      cat <<'EOF'
++Usage: start_observable_container.sh
++
++Starts the sglang observability helper container, waits for the per-run manifest
++to become available, enriches it (paths, cache snapshot), and prints both host-
++side and container-side manifest paths. The script exits non-zero if the
++container fails to launch.
++
++Environment variables:
++  HOST_OBS_ROOT        Parent root for all observability data (default: $HOME/sglang-observability).
++  HOST_TELEMETRY_ROOT  Override path for telemetry (default: $HOST_OBS_ROOT/telemetry).
++  HOST_PROFILES_ROOT   Override path for kernel caches (default: $HOST_OBS_ROOT/profiles).
++  HOST_MODELS_ROOT     Override path for models (default: $HOST_OBS_ROOT/models).
++  HOST_HF_ROOT         Override path for HuggingFace cache (default: $HOST_OBS_ROOT/huggingface).
++  CONTAINER_NAME       Container name (default: sglang-dev)
++  IMAGE_NAME           Image name (default: sglang-dev:gh200)
++
++No additional arguments are supported.
++EOF
++      exit 0
++      ;;
++    *)
++      echo "Unknown argument: $arg" >&2
++      echo "Pass --help for usage." >&2
++      exit 2
++      ;;
++  esac
++done
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
++
++# Determine host roots under a single parent in HOME by default
++HOST_OBS_ROOT="${HOST_OBS_ROOT:-$HOME/sglang-observability}"
++HOST_TELEMETRY_ROOT="${HOST_TELEMETRY_ROOT:-${HOST_OBS_ROOT}/telemetry}"
++HOST_PROFILES_ROOT="${HOST_PROFILES_ROOT:-${HOST_OBS_ROOT}/profiles}"
++HOST_MODELS_ROOT="${HOST_MODELS_ROOT:-${HOST_OBS_ROOT}/models}"
++
++HOST_MANIFEST_ROOT="${HOST_TELEMETRY_ROOT}/container_runs"
++RUN_META_FILE="${HOST_TELEMETRY_ROOT}/container_run_meta.env"
++
++CONTAINER_NAME="${CONTAINER_NAME:-sglang-dev}"
++IMAGE_NAME="${IMAGE_NAME:-sglang-dev:gh200}"
++
++# Testing hooks:
++#  - VALIDATE_ONLY=1: run preflight + directory setup and exit 0 before any Docker calls
++#  - EXPECT_OWNER_UID/EXPECT_OWNER_GID: override expected ownership in preflight checks
++EXPECT_UID="${EXPECT_OWNER_UID:-$(id -u)}"
++EXPECT_GID="${EXPECT_OWNER_GID:-$(id -g)}"
++# Allow different expected owner for specific files (used by tests)
++EXPECT_POINTER_UID="${EXPECT_POINTER_OWNER_UID:-${EXPECT_UID}}"
++EXPECT_POINTER_GID="${EXPECT_POINTER_OWNER_GID:-${EXPECT_GID}}"
++
++# In validate-only mode, we skip all Docker interactions entirely.
++if [[ "${VALIDATE_ONLY:-0}" != "1" ]]; then
++  existing_cid=$(docker ps -aq -f name="^${CONTAINER_NAME}$" || true)
++  if [[ -n "${existing_cid}" ]]; then
++    echo "Removing existing container ${CONTAINER_NAME} (${existing_cid})"
++    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
++  fi
++fi
++
++# Prepare host directories (per-run paths are created below once RUN_ID is known)
++mkdir -p \
++  "${HOST_TELEMETRY_ROOT}" \
++  "${HOST_MANIFEST_ROOT}" \
++  "${HOST_PROFILES_ROOT}" \
++  "${HOST_PROFILES_ROOT}/triton" \
++  "${HOST_PROFILES_ROOT}/torchinductor" \
++  "${HOST_PROFILES_ROOT}/flashinfer" \
++  "${HOST_PROFILES_ROOT}/deep_gemm" \
++  "${HOST_PROFILES_ROOT}/moe_configs/configs" \
++  "${HOST_PROFILES_ROOT}/.locks" \
++  "${HOST_PROFILES_ROOT}/.in_progress" \
++  "${HOST_MODELS_ROOT}"
++
++# Optional preflight: ensure host dirs (and key files, if present) are owned by the expected user/group
++if [[ "${HOST_DIR_OWNERSHIP_IGNORE:-}" != "1" ]]; then
++  check_own() {
++    local p="$1"; [[ -e "$p" ]] || return 0
++    local ug
++    ug=$(stat -c '%u:%g' "$p" 2>/dev/null || echo '')
++    if [[ "$ug" != "${EXPECT_UID}:${EXPECT_GID}" ]]; then
++      echo "ERROR: $p is owned by $ug, not ${EXPECT_UID}:${EXPECT_GID}. Fix with chown -R ${EXPECT_UID}:${EXPECT_GID} '$p' or set HOST_DIR_OWNERSHIP_IGNORE=1 to proceed." >&2
++      exit 3
++    fi
++  }
++  check_own_file() {
++    local p="$1"; [[ -e "$p" ]] || return 0
++    local ug
++    ug=$(stat -c '%u:%g' "$p" 2>/dev/null || echo '')
++    if [[ "$ug" != "${EXPECT_POINTER_UID}:${EXPECT_POINTER_GID}" ]]; then
++      echo "ERROR: $p is owned by $ug, not ${EXPECT_POINTER_UID}:${EXPECT_POINTER_GID}. Fix with chown ${EXPECT_POINTER_UID}:${EXPECT_POINTER_GID} '$p' or remove it." >&2
++      exit 3
++    fi
++  }
++  check_own "${HOST_TELEMETRY_ROOT}"; check_own "${HOST_PROFILES_ROOT}"; check_own "${HOST_MODELS_ROOT}"
++  # If a stale pointer file exists, validate its ownership too.
++  if [[ -e "${RUN_META_FILE}" ]]; then
++    check_own_file "${RUN_META_FILE}"
++  fi
++fi
++
++# Remove stale pointer to avoid reading an old manifest
++if [[ -f "${RUN_META_FILE}" ]]; then
++  rm -f "${RUN_META_FILE}" || true
++fi
++
++# In validate-only mode, stop here after preflight and directory initialization.
++if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
++  echo "VALIDATE_ONLY: preflight passed (no container launched)"
++  exit 0
++fi
++
++# Generate a run identifier up front so host-side services (Jaeger, manifests) can
++# prepare run-scoped directories before the helper container starts.
++timestamp=$(date -u +%Y%m%dT%H%M%SZ)
++short_id=$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)
++RUN_ID="container-run-${timestamp}-${short_id}"
++RUN_DIR_HOST="${HOST_TELEMETRY_ROOT}/container_runs/${RUN_ID}"
++RUN_DIR_CONTAINER="/telemetry/container_runs/${RUN_ID}"
++
++mkdir -p "${RUN_DIR_HOST}" || true
++if [[ "${VALIDATE_ONLY:-0}" != "1" ]]; then
++  mkdir -p \
++    "${RUN_DIR_HOST}/logs" \
++    "${RUN_DIR_HOST}/logs/exporters" \
++    "${RUN_DIR_HOST}/prometheus" \
++    "${RUN_DIR_HOST}/metrics" \
++    "${RUN_DIR_HOST}/configs" \
++    "${RUN_DIR_HOST}/jaeger/badger/keys" \
++    "${RUN_DIR_HOST}/jaeger/badger/values"
++  chmod 777 \
++    "${RUN_DIR_HOST}/jaeger" \
++    "${RUN_DIR_HOST}/jaeger/badger" \
++    "${RUN_DIR_HOST}/jaeger/badger/keys" \
++    "${RUN_DIR_HOST}/jaeger/badger/values" >/dev/null 2>&1 || true
++fi
++
++# Ensure Jaeger v2 (OTLP-native) is running on host ports
++ensure_jaeger_v2() {
++  local base_dir="$1"
++  if [[ -z "$base_dir" ]]; then
++    base_dir="$HOME/sglang-observability/jaeger-v2"
++  fi
++
++  local name="jaeger-v2"
++  local image="${JAEGER_V2_IMAGE:-jaegertracing/jaeger:2.11.0}"
++  local cfg_file="${base_dir}/config.yaml"
++  local badger_dir="${base_dir}/badger"
++
++  mkdir -p "${badger_dir}/keys" "${badger_dir}/values"
++  chmod 777 "$base_dir" "${badger_dir}" "${badger_dir}/keys" "${badger_dir}/values" >/dev/null 2>&1 || true
++
++  # Write authoritative Jaeger v2 config (OTLP receivers, Badger storage, query UI, health)
++  cat > "$cfg_file" <<'YAML'
++service:
++  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
++  pipelines:
++    traces:
++      receivers: [otlp]
++      processors: [batch]
++      exporters: [jaeger_storage_exporter]
++
++receivers:
++  otlp:
++    protocols:
++      grpc:
++        endpoint: 0.0.0.0:4317
++      http:
++        endpoint: 0.0.0.0:4318
++
++exporters:
++  jaeger_storage_exporter:
++    trace_storage: badger_store
++
++processors:
++  batch: {}
++
++extensions:
++  healthcheckv2:
++    use_v2: true  # v2 HTTP health surface lives behind this gate; without it /status stays silent
++    http:
++      endpoint: 0.0.0.0:13133
++      status:
++        enabled: true
++  jaeger_query:
++    storage:
++      traces: badger_store
++    grpc:
++      endpoint: 0.0.0.0:16685
++    http:
++      endpoint: 0.0.0.0:16686
++  jaeger_storage:
++    backends:
++      badger_store:
++        badger:
++          directories:
++            keys: /badger/keys
++            values: /badger/values
++          ephemeral: false
++YAML
++  local run_root="$(dirname "${base_dir}")"
++  local run_configs_dir="${run_root}/configs"
++  mkdir -p "${run_configs_dir}" >/dev/null 2>&1 || true
++  cp -f "${cfg_file}" "${run_configs_dir}/jaeger.yaml" >/dev/null 2>&1 || true
++  local cid
++  # Always recreate to avoid stale startup flags; data persists via bind mounts
++  docker rm -f "$name" >/dev/null 2>&1 || true
++  echo "Starting Jaeger v2 (name=${name})"
++  docker run -d --name "$name" \
++    -p 16686:16686 -p 4317:4317 -p 4318:4318 -p 13133:13133 \
++    -v "$cfg_file":/etc/jaeger/config.yaml:ro \
++    -v "${badger_dir}":/badger \
++    "$image" \
++    --config=/etc/jaeger/config.yaml >/dev/null
++  # wait for UI port to answer (any HTTP status)
++  local ready_url="${JAEGER_V2_READY_URL:-http://localhost:13133/status}"
++  for _ in {1..60}; do
++    if curl -s -o /dev/null "$ready_url"; then
++      echo "Jaeger v2 ready: UI http://localhost:16686 OTLP gRPC 127.0.0.1:4317 (health $ready_url)"
++      return 0
++    fi
++    sleep 1
++  done
++  echo "ERROR: Jaeger v2 did not become ready on port 16686 (URL=$ready_url)" >&2
++  docker logs --tail 100 "$name" >&2 || true
++  exit 1
++}
++
++ensure_jaeger_v2 "${RUN_DIR_HOST}/jaeger"
++
++verify_jaeger_otlp_ready() {
++  python3 - <<'PY'
++import grpc
++import time
++import sys
++
++deadline = time.time() + 60
++while time.time() < deadline:
++    channel = grpc.insecure_channel("127.0.0.1:4317")
++    try:
++        grpc.channel_ready_future(channel).result(timeout=1)
++        sys.exit(0)
++    except grpc.FutureTimeoutError:
++        time.sleep(1)
++
++sys.exit(1)
++PY
++  if [ $? -ne 0 ]; then
++    echo "ERROR: Jaeger OTLP endpoint 127.0.0.1:4317 did not become ready" >&2
++    exit 1
++  fi
++}
++
++verify_jaeger_otlp_ready
++
++# Jaeger health reports ready before the v3 query API is served.
++# Poll the /api/v3/services endpoint until it returns HTTP 200 to avoid 404s
++# in downstream telemetry collectors (e.g., the integration smoke test).
++jaeger_ready=false
++for _ in {1..60}; do
++  http_code=$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:16686/api/v3/services' || echo "")
++  if [ "${http_code}" = "200" ]; then
++    jaeger_ready=true
++    break
++  fi
++  sleep 1
++done
++
++if [ "${jaeger_ready}" != "true" ]; then
++  echo "ERROR: Jaeger v2 query API (16686) never became ready" >&2
++  docker logs --tail 100 jaeger-v2 >&2 || true
++  exit 1
++fi
++
++INIT_HOOK="/sgl-workspace/sglang/.devcontainer/post-create.sh"
++
++container_id=$(docker run -d \
++  --name "${CONTAINER_NAME}" \
++  --gpus all \
++  --shm-size 32g \
++  --ipc host \
++  --network host \
++  --add-host host.docker.internal:host-gateway \
++  --cap-add SYS_ADMIN \
++  -e INIT_RUN_HOOK="${INIT_HOOK}" \
++  -e HOST_TELEMETRY_ROOT="${HOST_TELEMETRY_ROOT}" \
++  -e HOST_PROFILES_ROOT="${HOST_PROFILES_ROOT}" \
++  -e HOST_MODELS_ROOT="${HOST_MODELS_ROOT}" \
++  -e HOST_MANIFEST_ROOT="${HOST_MANIFEST_ROOT}" \
++  -e CONTAINER_RUN_ID_OVERRIDE="${RUN_ID}" \
++  -e RUN_ROOT_OVERRIDE="${RUN_DIR_CONTAINER}" \
++  -e HOST_RUN_DIR="${RUN_DIR_HOST}" \
++  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
++  -e RUN_FILE_UID="$(id -u)" -e RUN_FILE_GID="$(id -g)" \
++  --entrypoint /bin/bash \
++  -v "${HOST_TELEMETRY_ROOT}:/telemetry" \
++  -v "${HOST_PROFILES_ROOT}:/profiles" \
++  -v "${HOST_MODELS_ROOT}:/models" \
++  -v "${ROOT_DIR}:/sgl-workspace/sglang" \
++  -w /sgl-workspace/sglang \
++  "${IMAGE_NAME}" \
++  -lc 'set -e; \
++        if id devuser >/dev/null 2>&1; then \
++          if [ -n "${HOST_GID:-}" ]; then groupmod -g "${HOST_GID}" devuser 2>/dev/null || true; fi; \
++          if [ -n "${HOST_UID:-}" ]; then usermod -u "${HOST_UID}" devuser 2>/dev/null || true; fi; \
++          chown -R devuser:devuser /home/devuser 2>/dev/null || true; \
++        fi; \
++        exec /sgl-workspace/sglang/.devcontainer/observability/init-run.sh sleep infinity')
++
++echo "${CONTAINER_NAME} is starting (container id ${container_id})."
++
++echo "Waiting for manifest pointer at ${RUN_META_FILE}..."
++manifest_container=""
++manifest_host=""
++start_time=$(date +%s)
++last_heartbeat=-5
++
++while true; do
++  now=$(date +%s)
++  elapsed=$((now - start_time))
++
++  status=$(docker inspect -f '{{.State.Status}}' "${container_id}" 2>/dev/null || true)
++  if [ -z "${status}" ]; then
++    echo "ERROR: container ${CONTAINER_NAME} (${container_id}) disappeared during startup." >&2
++    exit 1
++  fi
++
++  if [ "${status}" != "running" ]; then
++    exit_code=$(docker inspect -f '{{.State.ExitCode}}' "${container_id}" 2>/dev/null || echo "unknown")
++    reason=$(docker inspect -f '{{.State.Error}}' "${container_id}" 2>/dev/null || true)
++    echo "ERROR: container ${CONTAINER_NAME} (${container_id}) exited while starting (status=${status}, exit_code=${exit_code})." >&2
++    if [ -n "${reason}" ]; then
++      echo "Container error: ${reason}" >&2
++    fi
++    echo "Last 50 container log lines:" >&2
++    docker logs --tail 50 "${container_id}" >&2 || true
++    exit 1
++  fi
++
++  if [ -e "${RUN_META_FILE}" ]; then
++    manifest_container=$(awk -F= '/^CONTAINER_RUN_META_JSON=/{print $2}' "${RUN_META_FILE}" || true)
++    manifest_host=$(awk -F= '/^CONTAINER_RUN_META_JSON_HOST=/{print $2}' "${RUN_META_FILE}" || true)
++
++    if [ -z "${manifest_host}" ] && [ -n "${manifest_container}" ]; then
++      manifest_host="${HOST_MANIFEST_ROOT}/$(basename "${manifest_container}")"
++    fi
++
++    if [ -n "${manifest_host}" ] && [ -f "${manifest_host}" ]; then
++      echo "Observability container ready after ${elapsed}s."
++      if [ -n "${manifest_host}" ]; then
++        echo "CONTAINER_RUN_META_JSON_HOST=${manifest_host}"
++      fi
++      if [ -n "${manifest_container}" ]; then
++        echo "CONTAINER_RUN_META_JSON=${manifest_container}"
++      fi
++      break
++    fi
++  fi
++
++  if [ $elapsed -ge 0 ] && [ $((elapsed / 5)) -gt $((last_heartbeat / 5)) ]; then
++    echo "Container starting... (${elapsed}s elapsed)"
++    last_heartbeat=$elapsed
++  fi
++
++  sleep 1
++done
+diff --git a/tools/analyze_expert_trace.py b/tools/analyze_expert_trace.py
+new file mode 100644
+index 000000000..2b67a1c30
+--- /dev/null
++++ b/tools/analyze_expert_trace.py
+@@ -0,0 +1,151 @@
++import argparse
++import json
++from collections import Counter, defaultdict
++from pathlib import Path
++
++
++def main():
++    ap = argparse.ArgumentParser(description="Analyze SGLang expert-trace JSONL files")
++    ap.add_argument(
++        "--dir", required=True, help="Directory containing expert_trace_*.jsonl"
++    )
++    ap.add_argument(
++        "--top", type=int, default=10, help="Top-N experts per layer to show"
++    )
++    # Optional filters so we can focus on a particular run/session.
++    ap.add_argument("--run-id", help="Filter records by run_id")
++    ap.add_argument("--session-id", help="Filter records by server_session_id")
++    ap.add_argument(
++        "--phase",
++        default=None,
++        help="Filter by phase (e.g., decode, prefill, mixed). Comma-separated allowed.",
++    )
++    ap.add_argument(
++        "--dedupe",
++        action="store_true",
++        help="De-duplicate token events by (phase, step, layer, slot, position, experts)",
++    )
++    ap.add_argument(
++        "--step-window",
++        type=int,
++        default=0,
++        help="Show per-step token counts for the last N steps (0=disable)",
++    )
++    args = ap.parse_args()
++
++    trace_dir = Path(args.dir)
++    files = sorted(trace_dir.glob("expert_trace_*.jsonl"))
++    if not files:
++        print("No expert_trace_*.jsonl files found in", trace_dir)
++        return 2
++
++    per_layer_counts = defaultdict(Counter)
++    per_phase_layer_counts = defaultdict(lambda: defaultdict(Counter))
++    total_records = 0
++    total_token_events = 0
++    records_by_phase = Counter()
++    token_events_by_phase = Counter()
++    step_layer_events = Counter()  # (phase, step, layer) -> token count
++    all_steps = set()
++
++    phase_filter = None
++    if args.phase:
++        phase_filter = {p.strip().lower() for p in args.phase.split(",") if p.strip()}
++
++    seen = set()  # dedupe across files if requested
++
++    for f in files:
++        with f.open() as fh:
++            for line in fh:
++                if not line.strip():
++                    continue
++                rec = json.loads(line)
++                run_id = rec.get("run_id")
++                session_id = rec.get("session_id")
++
++                if args.run_id and run_id != args.run_id:
++                    continue
++                if args.session_id and session_id != args.session_id:
++                    continue
++
++                layer = int(rec.get("layer", -1))
++                phase = (rec.get("phase", "unknown") or "unknown").lower()
++                if phase_filter and phase not in phase_filter and "all" not in phase_filter:
++                    continue
++                tokens = rec.get("tokens", [])
++                step = int(rec.get("step", -1))
++                for tok in tokens:
++                    slot = tok.get("slot")
++                    pos = tok.get("position")
++                    experts = tuple(int(ex) for ex in tok.get("experts", []))
++                    if args.dedupe:
++                        key = (phase, step, layer, slot, pos, experts)
++                        if key in seen:
++                            continue
++                        seen.add(key)
++                    for ex in experts:
++                        per_layer_counts[layer][int(ex)] += 1
++                        per_phase_layer_counts[phase][layer][int(ex)] += 1
++                        total_token_events += 1
++                        token_events_by_phase[phase] += 1
++                    if experts:
++                        step_layer_events[(phase, step, layer)] += 1
++                        all_steps.add((phase, step))
++                total_records += 1
++                records_by_phase[phase] += 1
++
++    print(
++        f"files={len(files)} records={total_records} token_expert_events={total_token_events}"
++    )
++
++    if records_by_phase:
++        print("phase summary:")
++        for phase, rec_cnt in sorted(records_by_phase.items()):
++            tok_cnt = token_events_by_phase.get(phase, 0)
++            print(f"  {phase:>8}: records={rec_cnt} token_events={tok_cnt}")
++
++    # Step coverage summary (helps confirm decode visibility)
++    if all_steps:
++        by_phase = defaultdict(set)
++        for phase, step in all_steps:
++            by_phase[phase].add(step)
++        print("\nstep coverage:")
++        for phase in sorted(by_phase.keys()):
++            steps = sorted(by_phase[phase])
++            print(f"  {phase:>8}: unique_steps={len(steps)} first={steps[0] if steps else 'n/a'} last={steps[-1] if steps else 'n/a'}")
++
++    if args.step_window and step_layer_events:
++        max_step = max(s for (_, s, _) in step_layer_events.keys())
++        min_step = max_step - args.step_window + 1
++        print(f"\nper-step token counts (last {args.step_window} steps, phase filtered):")
++        for step in range(min_step, max_step + 1):
++            # Sum across layers for readability
++            total = sum(cnt for (ph, st, _), cnt in step_layer_events.items() if st == step)
++            if total:
++                print(f"  step {step:>6}: tokens={total}")
++
++    for layer in sorted(k for k in per_layer_counts.keys() if k >= 0):
++        c = per_layer_counts[layer]
++        layer_total = sum(c.values()) or 1
++        uniques = len(c)
++        print(f"layer {layer:>3}: total={layer_total} unique_experts={uniques}")
++        for ex, cnt in c.most_common(args.top):
++            pct = 100.0 * cnt / layer_total
++            print(f"  expert {ex:>4}: {cnt:>7} ({pct:5.1f}%)")
++
++    if per_phase_layer_counts:
++        print("\nper-phase detail:")
++        for phase in sorted(per_phase_layer_counts.keys()):
++            print(f"phase={phase}")
++            for layer in sorted(k for k in per_phase_layer_counts[phase].keys() if k >= 0):
++                c = per_phase_layer_counts[phase][layer]
++                layer_total = sum(c.values()) or 1
++                uniques = len(c)
++                print(f"  layer {layer:>3}: total={layer_total} unique_experts={uniques}")
++                for ex, cnt in c.most_common(args.top):
++                    pct = 100.0 * cnt / layer_total
++                    print(f"    expert {ex:>4}: {cnt:>7} ({pct:5.1f}%)")
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

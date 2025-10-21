@@ -84,12 +84,17 @@ Learn:
 - Writer activation via `SGLANG_MOE_TRACE_DIR`.
 - Hooks: `on_forward_pass_start`, `handle_on_select_experts`, `flush`.
 - File naming: `expert_trace_<run>_<session>_rankXXXXX.jsonl`.
-- Analyzer: per‑layer totals and top‑N experts.
+- Analyzer: per‑layer totals and top‑N experts; new flags `--phase`, `--dedupe`, `--step-window` help verify decode coverage.
 Self‑check: where slots/positions/seq_lens come from (ForwardBatch).
 
-## 10) Qwen3‑Next expert metadata (5–10 min)
+## 10) Qwen3‑Next decode nuances (5–10 min)
 File: `python/sglang/srt/models/qwen3_next.py`.
-Learn: `get_model_config_for_expert_location(...)` is present; per_token recorder aligned to top‑10.
+Learn:
+- `get_model_config_for_expert_location(...)` is present; per_token recorder aligned to top‑10.
+- Some decode backends (e.g., Triton fused, EP=1) may bypass Python Top‑K hooks. Use env‑gated taps:
+  - `SGLANG_MOE_TRACE_DECODE_FROM_RUNNER=1` to emit from the decode runner, and
+  - `SGLANG_MOE_TRACE_FROM_DISPATCH=1` to emit from the EP=1 standard dispatcher.
+- Verify CLI backend flags with the server’s argv log.
 Self‑check: explain the assertion if a model lacks this hook.
 
 ---
